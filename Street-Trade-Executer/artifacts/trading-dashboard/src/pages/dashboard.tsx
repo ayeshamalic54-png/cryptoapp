@@ -228,9 +228,9 @@ export default function Dashboard() {
     mt5Login = 0,
   } = dashboard;
 
-  const totalRealizedGain = totalClosedProfit > 0 ? totalClosedProfit : (equity - (initialBalance ?? 10713.16));
-  const overallGain = totalRealizedGain;
-  const overallGainPercent = (initialBalance ?? 10713.16) > 0 ? (overallGain / (initialBalance ?? 10713.16)) * 100 : 0;
+  const baseInitial = initialBalance > 0 ? initialBalance : 10706.00;
+  const overallGain = equity > 0 ? (equity - baseInitial) : totalClosedProfit;
+  const overallGainPercent = baseInitial > 0 ? (overallGain / baseInitial) * 100 : 0;
 
   const matchingAsset = dashboard.scannedAssets?.find(
     (a: any) => a.symbolPair.startsWith(selectedChartSymbol) || a.symbolPair.endsWith(selectedChartSymbol)
