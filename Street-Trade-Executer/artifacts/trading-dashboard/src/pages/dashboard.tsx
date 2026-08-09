@@ -95,7 +95,7 @@ export default function Dashboard() {
   const isReadOnly = localStorage.getItem("wasee_role") === "user";
   const queryClient = useQueryClient();
   const [manualSymbol, setManualSymbol] = useState("");
-  const [selectedChartSymbol, setSelectedChartSymbol] = useState("EURUSD");
+  const [selectedChartSymbol, setSelectedChartSymbol] = useState("BTCUSDT");
   const [manualLots, setManualLots] = useState("0.01");
   const [manualSl, setManualSl] = useState("10");
   const [manualTp, setManualTp] = useState("20");
@@ -170,6 +170,16 @@ export default function Dashboard() {
       return next.slice(-90);
     });
   }, [wsData]);
+
+  useEffect(() => {
+    const activePair = wsData?.currentPair || httpData?.currentPair;
+    if (activePair) {
+      const mainSym = activePair.split("/")[0];
+      if (mainSym && selectedChartSymbol === "EURUSD") {
+        setSelectedChartSymbol(mainSym);
+      }
+    }
+  }, [wsData?.currentPair, httpData?.currentPair]);
 
   const executeTrade = useExecuteTrade();
   const { data: signalsData } = useGetSignals({ limit: 50 });
