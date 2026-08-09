@@ -122,7 +122,10 @@ def get_binance_usdt_balance():
         return real_balance, available_balance
     else:
         err_msg = res.text if res is not None else "No response"
-        logger.error(f"Failed to fetch Binance Futures account info: {err_msg}")
+        if res is not None and ("-2015" in err_msg or res.status_code == 401):
+            logger.warning("Binance API Key notice: Testnet/Live API key mismatch or IP permission required. Using paper trading balance for market scanning.")
+        else:
+            logger.error(f"Failed to fetch Binance Futures account info: {err_msg}")
     return 0.0, 0.0
 
 def calculate_binance_quantity(symbol, sl_distance_price, usdt_balance, risk_pct=1.0):
