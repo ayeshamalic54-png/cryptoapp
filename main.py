@@ -1753,7 +1753,8 @@ def main():
                 scanned_assets_z_cache[pk] = z
 
                 # Track telemetry for current active pair
-                if active_pair_z_score is None or pk.upper().strip() == current_pair_context.upper().strip():
+                target_focus = f"{S_A}/{S_B}"
+                if pk.upper().strip() == target_focus.upper().strip() or (active_pair_z_score is None and pk.upper().strip() == current_pair_context.upper().strip()):
                     current_pair_context = pk
                     active_pair_z_score = z
                     active_pair_beta = beta
@@ -1787,6 +1788,13 @@ def main():
 
             # Position exit checks for active pair
 
+
+            if active_pair_z_score is None:
+                active_pair_z_score = 0.0
+                active_pair_beta = 0.0
+                active_pair_obi_a = 0.5
+                active_pair_obi_b = 0.5
+                active_pair_velocity = 0.0
 
             # ── 3. MANAGE ACTIVE POSITION EXITS ──
             kf_active = get_kf_for_pair(S_A_resolved, S_B_resolved)
