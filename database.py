@@ -279,6 +279,7 @@ def update_bot_state(active_pair, system_status, equity, drawdown_percent,
             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, %s, %s, %s, %s
         )
         ON CONFLICT (id) DO UPDATE SET
+            active_pair        = EXCLUDED.active_pair,
             system_status      = EXCLUDED.system_status,
             equity             = EXCLUDED.equity,
             drawdown_percent   = EXCLUDED.drawdown_percent,

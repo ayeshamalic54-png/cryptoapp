@@ -1525,11 +1525,11 @@ def main():
                 logger.error(f"Error syncing open trades telemetry to DB: {e}")
 
             # ── 2. SCANNING LOOP FOR ALL PAIRS ──
-            active_pair_z_score = 0.0
-            active_pair_beta = 0.0
-            active_pair_obi_a = 0.0
-            active_pair_obi_b = 0.0
-            active_pair_velocity = 0.0
+            active_pair_z_score = None
+            active_pair_beta = None
+            active_pair_obi_a = None
+            active_pair_obi_b = None
+            active_pair_velocity = None
 
             # Bulk fetch bookTickers to optimize rate limits
             bulk_ticks = {}
@@ -1753,7 +1753,8 @@ def main():
                 scanned_assets_z_cache[pk] = z
 
                 # Track telemetry for current active pair
-                if pk.upper().strip() == current_pair_context.upper().strip():
+                if active_pair_z_score is None or pk.upper().strip() == current_pair_context.upper().strip():
+                    current_pair_context = pk
                     active_pair_z_score = z
                     active_pair_beta = beta
                     active_pair_obi_a = obi_a
