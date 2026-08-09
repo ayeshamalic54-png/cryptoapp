@@ -53,12 +53,16 @@ def get_symbol_filters(symbol):
                 price_filter = [f for f in s["filters"] if f["filterType"] == "PRICE_FILTER"]
                 
                 step_size = float(lot_size_filter[0]["stepSize"]) if lot_size_filter else 0.001
+                max_qty = float(lot_size_filter[0]["maxQty"]) if lot_size_filter else 1000000.0
+                min_qty = float(lot_size_filter[0]["minQty"]) if lot_size_filter else step_size
                 tick_size = float(price_filter[0]["tickSize"]) if price_filter else 0.01
                 
                 exchange_info_cache[sym_name] = {
                     "quantityPrecision": int(s["quantityPrecision"]),
                     "pricePrecision": int(s["pricePrecision"]),
                     "stepSize": step_size,
+                    "maxQty": max_qty,
+                    "minQty": min_qty,
                     "tickSize": tick_size
                 }
             return exchange_info_cache.get(s_upper)
@@ -129,7 +133,7 @@ def get_binance_usdt_balance():
     return 0.0, 0.0
 
 def calculate_binance_quantity(symbol, sl_distance_price, usdt_balance, risk_pct=1.0):
-    """Calculates risk-based lot sizing for Binance Futures trading."""
+    """Calculates risk-based lot sizing for Binance Futures trading safely clamped to exchangeInfo LOT_SIZE rules."""
     if sl_distance_price <= 0:
         return 0.0
         
@@ -141,11 +145,19 @@ def calculate_binance_quantity(symbol, sl_distance_price, usdt_balance, risk_pct
     risk_amount = usdt_balance * (risk_pct / 100.0)
     raw_qty = risk_amount / sl_distance_price
     
-    step_size = filters["stepSize"]
-    rounded_qty = round(round(raw_qty / step_size) * step_size, filters["quantityPrecision"])
+    step_size = filters.get("stepSize", 0.001)
+    max_qty = filters.get("maxQty", 1000000.0)
+    min_qty = filters.get("minQty", step_size)
+    qty_prec = filters.get("quantityPrecision", 3)
     
-    if rounded_qty < step_size:
-        rounded_qty = step_size
+    rounded_qty = round(round(raw_qty / step_size) * step_size, qty_prec)
+    
+    # Safety check: clamp quantity between min_qty and max_qty allowed by Binance Futures
+    if rounded_qty > max_qty:
+        logger.warning(f"Calculated quantity {rounded_qty:.3f} for {symbol} exceeded Binance maxQty {max_qty:.3f}. Capping to maxQty.")
+        rounded_qty = max_qty
+    if rounded_qty < min_qty:
+        rounded_qty = min_qty
         
     return rounded_qty
 
@@ -169,12 +181,15 @@ def execute_three_part_binance_trade(symbol, is_long, entry_price, sl_price, tot
     tick_size = filters["tickSize"] if filters else 0.01
     step_size = filters["stepSize"] if filters else 0.001
     
+    max_qty = filters.get("maxQty", 1000000.0) if filters else 1000000.0
+    safe_total_qty = min(round(total_qty, qty_prec), max_qty)
+
     # 1. Market Entry Order
     params = {
         "symbol": symbol,
         "side": side,
         "type": "MARKET",
-        "quantity": round(total_qty, qty_prec)
+        "quantity": safe_total_qty
     }
     
     logger.info(f"Sending Market Entry order to Binance Futures: {side} {total_qty} {symbol}")
