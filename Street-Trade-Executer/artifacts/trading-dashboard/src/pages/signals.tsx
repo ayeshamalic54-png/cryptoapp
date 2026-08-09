@@ -1,0 +1,429 @@
+import { useGetSignals, getGetSignalsQueryKey, useGetConfig, useExecuteTrade } from "@workspace/api-client-react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
+import { format } from "date-fns";
+import { Button } from "@/components/ui/button";
+import { useToast } from "@/hooks/use-toast";
+
+export default function Signals() {
+  const executeTrade = useExecuteTrade();
+  const { toast } = useToast();
+  const isReadOnly = localStorage.getItem("wasee_role") === "user";
+  const { data: signals, isLoading: isSignalsLoading } = useGetSignals({ limit: 100 }, {
+    query: {
+      queryKey: getGetSignalsQueryKey({ limit: 100 })
+    }
+  });
+
+  const { data: config, isLoading: isConfigLoading } = useGetConfig();
+
+  const isLoading = isSignalsLoading || isConfigLoading;
+
+  const handleExecuteSignal = (sig: any) => {
+    const isBuy = sig.action === "BUY_SPREAD";
+    const dirA = isBuy ? "BUY" : "SELL";
+    const dirB = isBuy ? "SELL" : "BUY";
+    
+    const lots = config?.defaultLots ?? 0.01;
+    const slPips = config?.slPips ?? 10;
+    const tpPips = config?.tpPips ?? 20;
+
+    executeTrade.mutate(
+      { data: { symbol: sig.symbolA, direction: dirA, lots, slPips, tpPips } },
+      {
+        onSuccess: () => {
+          executeTrade.mutate(
+            { data: { symbol: sig.symbolB, direction: dirB, lots, slPips, tpPips } },
+            {
+              onSuccess: () => {
+                toast({
+                  title: "[EXECUTE] One-Click Spread Executed",
+                  description: `Queued: ${dirA} ${sig.symbolA} & ${dirB} ${sig.symbolB} (${lots} lots) successfully!`,
+                });
+              },
+              onError: () => {
+                toast({ title: `Failed to queue second leg ${sig.symbolB}`, variant: "destructive" });
+              }
+            }
+          );
+        },
+        onError: () => {
+          toast({ title: `Failed to queue first leg ${sig.symbolA}`, variant: "destructive" });
+        }
+      }
+    );
+  };
+
+  const getPipSize = (sym: string): number => {
+    const s = sym.toUpperCase();
+    if (s.includes("JPY")) return 0.01;
+    if (s.includes("XAU")) return 1.0;
+    if (s.includes("XAG")) return 0.1;
+    if (s.includes("BTC")) return 1.0;
+    if (s.includes("ETH")) return 0.1;
+    if (s.includes("SOL") || s.includes("BNB") || s.includes("AVAX")) return 0.01;
+    if (s.includes("XRP") || s.includes("ADA") || s.includes("DOGE") || s.includes("MATIC")) return 0.0001;
+    if (["US500", "US30", "NAS100", "GER30", "UK100", "SPX", "DJI", "NDX"].some(x => s.includes(x))) return 1.0;
+    if (["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA", "AMD", "META", "AMZN"].some(x => s.includes(x))) return 0.1;
+    return 0.0001;
+  };
+
+  const getActionBadge = (action: string) => {
+    switch(action) {
+      case "BUY_SPREAD":
+        return <Badge variant="outline" className="bg-green-500/10 text-green-500 border-green-500/30 rounded-sm font-mono text-[10px]">BUY_SPREAD</Badge>;
+      case "SELL_SPREAD":
+        return <Badge variant="outline" className="bg-red-500/10 text-red-500 border-red-500/30 rounded-sm font-mono text-[10px]">SELL_SPREAD</Badge>;
+      default:
+        return <Badge variant="outline" className="bg-gray-500/10 text-gray-400 border-gray-500/30 rounded-sm font-mono text-[10px]">NONE</Badge>;
+    }
+  };
+
+  const getSignalDetails = (sig: any) => {
+    const entry = Number(sig.priceA);
+    const entryB = Number(sig.priceB);
+    const slPips = config?.slPips ?? 10;
+    const tpPips = config?.tpPips ?? 20;
+    
+    const s = sig.symbolA.toUpperCase();
+    const isCrypto = true;
+    const slDist = slPips * (entry * 0.01);
+    const tpDist = tpPips * (entry * 0.01);
+    const pricePrecision = 2;
+
+    const isCryptoB = true;
+    const slDistB = slPips * (entryB * 0.01);
+    const pricePrecisionB = 2;
+
+    const isBuy = sig.action === "BUY_SPREAD";
+    const slB = isBuy ? (entryB + slDistB) : (entryB - slDistB);
+
+    if (sig.action === "BUY_SPREAD") {
+      return {
+        entry: entry.toFixed(pricePrecision),
+        sl: (entry - slDist).toFixed(pricePrecision),
+        tp1: (entry + slDist).toFixed(pricePrecision),
+        tp2: (entry + tpDist).toFixed(pricePrecision),
+        tp3: (entry + slDist * 3.5).toFixed(pricePrecision),
+        entryB: entryB.toFixed(pricePrecisionB),
+        slB: slB.toFixed(pricePrecisionB),
+      };
+    } else if (sig.action === "SELL_SPREAD") {
+      return {
+        entry: entry.toFixed(pricePrecision),
+        sl: (entry + slDist).toFixed(pricePrecision),
+        tp1: (entry - slDist).toFixed(pricePrecision),
+        tp2: (entry - tpDist).toFixed(pricePrecision),
+        tp3: (entry - slDist * 3.5).toFixed(pricePrecision),
+        entryB: entryB.toFixed(pricePrecisionB),
+        slB: slB.toFixed(pricePrecisionB),
+      };
+    }
+    return { entry: "-", sl: "-", tp1: "-", tp2: "-", tp3: "-", entryB: "-", slB: "-" };
+  };
+
+  const getTpPill = (partName: string, tradesList: any[] = []) => {
+    const trade = tradesList.find((t: any) => t.comment && t.comment.includes(partName));
+    if (!trade) {
+      return <Badge variant="outline" className="bg-gray-500/5 text-muted-foreground/40 border-border rounded-sm font-mono text-[9px] px-1 py-0 h-4">N/A</Badge>;
+    }
+    if (trade.status === "OPEN") {
+      return <Badge variant="outline" className="bg-blue-500/10 text-blue-400 border-blue-500/20 rounded-sm font-mono text-[9px] px-1 py-0 h-4">OPEN</Badge>;
+    }
+    const profit = Number(trade.profit ?? 0);
+    if (profit > 0) {
+      return <Badge variant="outline" className="bg-green-500/10 text-green-400 border-green-500/20 rounded-sm font-mono text-[9px] px-1 py-0 h-4">HIT</Badge>;
+    } else {
+      return <Badge variant="outline" className="bg-red-500/15 text-red-400 border-red-500/20 rounded-sm font-mono text-[9px] px-1 py-0 h-4">SL</Badge>;
+    }
+  };
+
+  const getHedgePill = (tradesList: any[] = []) => {
+    const trade = tradesList.find((t: any) => t.comment && t.comment.includes("HEDGE"));
+    if (!trade) return null;
+    if (trade.status === "OPEN") {
+      return <Badge variant="outline" className="bg-blue-500/10 text-blue-400 border-blue-500/20 rounded-sm font-mono text-[9px] px-1 py-0 h-4">H_OPEN</Badge>;
+    }
+    const profit = Number(trade.profit ?? 0);
+    const handleCopySignal = (sig: any) => {
+    const isBuy = sig.action === "BUY_SPREAD";
+    const details = getSignalDetails(sig);
+    const timeStr = format(new Date(sig.timestamp), "EEEE, dd/MM/yyyy, hh:mm:ss a");
+    
+    const actionEmoji = isBuy ? "[ONLINE]" : "[OFFLINE]";
+    const legBDirection = isBuy ? "SELL" : "BUY";
+
+    const defaultLots = config?.defaultLots ?? 0.01;
+    const formatVol = (val: number) => val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+    const partLotsA = formatVol(defaultLots / 3.0);
+    const totalLotsA = formatVol(defaultLots);
+    const lotsB = formatVol(defaultLots * Number(sig.beta ?? 1.0));
+
+    const text = `[SIGNAL] *AWAIS JANE STREET QUANTUM ENGINE SIGNAL* [SIGNAL]\n\n` +
+      `${actionEmoji} *ACTION:* ${sig.action} (${sig.symbolA} / ${sig.symbolB})\n` +
+      `[TIME] *Time:* ${timeStr}\n` +
+      `[Z-SCORE] *Z-Score:* ${sig.zScore.toFixed(3)}\n\n` +
+      `[LEG A] *LEG A (${sig.symbolA}) - 3 Parts:*\n` +
+      `  [ENTRY] *Entry:* ${details.entry}\n` +
+      `  [SL] *Stop Loss (SL):* ${details.sl}\n` +
+      `  [TP] *TP1:* ${details.tp1}\n` +
+      `  [TP] *TP2:* ${details.tp2}\n` +
+      `  [TP] *TP3:* ${details.tp3}\n` +
+      `  [LOTS] *Lots:* 3 parts of ${partLotsA} (Total ${totalLotsA})\n\n` +
+      `[LEG B] *LEG B (${sig.symbolB}) - Hedge:*\n` +
+      `  [ENTRY] *Entry:* ${details.entryB}\n` +
+      `  [SL] *Stop Loss (SL):* ${details.slB}\n` +
+      `  [TP] *TP:* Dynamic (Spread Reversion)\n` +
+      `  [LOTS] *Lots:* ${lotsB}\n` +
+      `  [ENTRY] *Position:* ${legBDirection}`;
+
+    navigator.clipboard.writeText(text).then(() => {
+      toast({
+        title: "[COPY] Copied to Clipboard!",
+        description: "Signal text formatted for WhatsApp has been copied successfully.",
+      });
+    }).catch(() => {
+      toast({
+        title: "[FAILED] Failed to Copy",
+        description: "Could not copy signal to clipboard.",
+        variant: "destructive"
+      });
+    });
+  };
+
+  return (
+      <Badge variant="outline" className={cn(
+        "rounded-sm font-mono text-[9px] px-1 py-0 h-4",
+        profit >= 0 ? "bg-green-500/10 text-green-400 border-green-500/20" : "bg-red-500/15 text-red-400 border-red-500/20"
+      )}>
+        H_CLSD
+      </Badge>
+    );
+  };
+
+  const handleCopySignal = (sig: any) => {
+    const isBuy = sig.action === "BUY_SPREAD";
+    const details = getSignalDetails(sig);
+    const timeStr = format(new Date(sig.timestamp), "EEEE, dd/MM/yyyy, hh:mm:ss a");
+    
+    const actionEmoji = isBuy ? "[ONLINE]" : "[OFFLINE]";
+    const legBDirection = isBuy ? "SELL" : "BUY";
+
+    const defaultLots = config?.defaultLots ?? 0.01;
+    const formatVol = (val: number) => val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+    const partLotsA = formatVol(defaultLots / 3.0);
+    const totalLotsA = formatVol(defaultLots);
+    const lotsB = formatVol(defaultLots * Number(sig.beta ?? 1.0));
+
+    const text = `[SIGNAL] *AWAIS JANE STREET QUANTUM ENGINE SIGNAL* [SIGNAL]\n\n` +
+      `${actionEmoji} *ACTION:* ${sig.action} (${sig.symbolA} / ${sig.symbolB})\n` +
+      `[TIME] *Time:* ${timeStr}\n` +
+      `[Z-SCORE] *Z-Score:* ${sig.zScore.toFixed(3)}\n\n` +
+      `[LEG A] *LEG A (${sig.symbolA}) - 3 Parts:*\n` +
+      `  [ENTRY] *Entry:* ${details.entry}\n` +
+      `  [SL] *Stop Loss (SL):* ${details.sl}\n` +
+      `  [TP] *TP1:* ${details.tp1}\n` +
+      `  [TP] *TP2:* ${details.tp2}\n` +
+      `  [TP] *TP3:* ${details.tp3}\n` +
+      `  [LOTS] *Lots:* 3 parts of ${partLotsA} (Total ${totalLotsA})\n\n` +
+      `[LEG B] *LEG B (${sig.symbolB}) - Hedge:*\n` +
+      `  [ENTRY] *Entry:* ${details.entryB}\n` +
+      `  [SL] *Stop Loss (SL):* ${details.slB}\n` +
+      `  [TP] *TP:* Dynamic (Spread Reversion)\n` +
+      `  [LOTS] *Lots:* ${lotsB}\n` +
+      `  [ENTRY] *Position:* ${legBDirection}`;
+
+    navigator.clipboard.writeText(text).then(() => {
+      toast({
+        title: "[COPY] Copied to Clipboard!",
+        description: "Signal text formatted for WhatsApp has been copied successfully.",
+      });
+    }).catch(() => {
+      toast({
+        title: "[FAILED] Failed to Copy",
+        description: "Could not copy signal to clipboard.",
+        variant: "destructive"
+      });
+    });
+  };
+
+  return (
+    <div className="flex flex-col h-full overflow-auto bg-background p-6 space-y-6">
+      <div>
+        <h2 className="text-2xl font-bold tracking-tight text-foreground">Signal Log</h2>
+        <p className="text-sm text-muted-foreground">Statistical arbitrage model generation log</p>
+      </div>
+
+      <Card className="bg-card border-border">
+        <CardContent className="p-0">
+          {isLoading ? (
+            <div className="p-6 space-y-4">
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-8 w-full" />
+            </div>
+          ) : !signals || signals.length === 0 ? (
+            <div className="text-sm text-muted-foreground py-12 text-center">No signals recorded</div>
+          ) : (
+            <Table>
+              <TableHeader className="bg-muted/50">
+                <TableRow className="border-border hover:bg-transparent">
+                  <TableHead className="font-mono text-xs">TIME</TableHead>
+                  <TableHead className="font-mono text-xs">ACTION</TableHead>
+                  <TableHead className="font-mono text-xs">PAIR A / B</TableHead>
+                  <TableHead className="font-mono text-xs text-right font-medium">ENTRY</TableHead>
+                  <TableHead className="font-mono text-xs text-right text-red-400 font-medium">SL</TableHead>
+                  <TableHead className="font-mono text-xs text-right text-green-400 font-medium">TP1</TableHead>
+                  <TableHead className="font-mono text-xs text-right text-green-400 font-medium">TP2</TableHead>
+                  <TableHead className="font-mono text-xs text-right text-green-400 font-medium">TP3</TableHead>
+                  <TableHead className="font-mono text-xs text-center">TARGETS</TableHead>
+                  <TableHead className="font-mono text-xs text-right">LOTS</TableHead>
+                  <TableHead className="font-mono text-xs text-right">P&L</TableHead>
+                  <TableHead className="font-mono text-xs text-right">Z-SCORE</TableHead>
+                  <TableHead className="font-mono text-xs text-center">ACTION</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {signals.map((sig) => {
+                  const details = getSignalDetails(sig);
+                  const tradesList = sig.trades ?? [];
+                  const totalProfitVal = sig.totalProfit;
+                  const handleCopySignal = (sig: any) => {
+    const isBuy = sig.action === "BUY_SPREAD";
+    const details = getSignalDetails(sig);
+    const timeStr = format(new Date(sig.timestamp), "EEEE, dd/MM/yyyy, hh:mm:ss a");
+    
+    const actionEmoji = isBuy ? "[ONLINE]" : "[OFFLINE]";
+    const legBDirection = isBuy ? "SELL" : "BUY";
+
+    const defaultLots = config?.defaultLots ?? 0.01;
+    const formatVol = (val: number) => val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+    const partLotsA = formatVol(defaultLots / 3.0);
+    const totalLotsA = formatVol(defaultLots);
+    const lotsB = formatVol(defaultLots * Number(sig.beta ?? 1.0));
+
+    const text = `[SIGNAL] *AWAIS JANE STREET QUANTUM ENGINE SIGNAL* [SIGNAL]\n\n` +
+      `${actionEmoji} *ACTION:* ${sig.action} (${sig.symbolA} / ${sig.symbolB})\n` +
+      `[TIME] *Time:* ${timeStr}\n` +
+      `[Z-SCORE] *Z-Score:* ${sig.zScore.toFixed(3)}\n\n` +
+      `[LEG A] *LEG A (${sig.symbolA}) - 3 Parts:*\n` +
+      `  [ENTRY] *Entry:* ${details.entry}\n` +
+      `  [SL] *Stop Loss (SL):* ${details.sl}\n` +
+      `  [TP] *TP1:* ${details.tp1}\n` +
+      `  [TP] *TP2:* ${details.tp2}\n` +
+      `  [TP] *TP3:* ${details.tp3}\n` +
+      `  [LOTS] *Lots:* 3 parts of ${partLotsA} (Total ${totalLotsA})\n\n` +
+      `[LEG B] *LEG B (${sig.symbolB}) - Hedge:*\n` +
+      `  [ENTRY] *Entry:* ${details.entryB}\n` +
+      `  [SL] *Stop Loss (SL):* ${details.slB}\n` +
+      `  [TP] *TP:* Dynamic (Spread Reversion)\n` +
+      `  [LOTS] *Lots:* ${lotsB}\n` +
+      `  [ENTRY] *Position:* ${legBDirection}`;
+
+    navigator.clipboard.writeText(text).then(() => {
+      toast({
+        title: "[COPY] Copied to Clipboard!",
+        description: "Signal text formatted for WhatsApp has been copied successfully.",
+      });
+    }).catch(() => {
+      toast({
+        title: "[FAILED] Failed to Copy",
+        description: "Could not copy signal to clipboard.",
+        variant: "destructive"
+      });
+    });
+  };
+
+  return (
+                    <TableRow key={sig.id} className="border-border hover:bg-muted/30">
+                      <TableCell className="font-mono text-xs text-muted-foreground">
+                        {format(new Date(sig.timestamp), "EEEE, dd/MM/yyyy, hh:mm:ss a")}
+                      </TableCell>
+                      <TableCell>{getActionBadge(sig.action)}</TableCell>
+                      <TableCell className="font-mono text-sm">
+                        <div className="flex flex-col">
+                          <span>{sig.symbolA}</span>
+                          <span className="text-[10px] text-muted-foreground">{sig.symbolB}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="font-mono text-right text-sm">{details.entry}</TableCell>
+                      <TableCell className="font-mono text-right text-sm text-red-400">{details.sl}</TableCell>
+                      <TableCell className="font-mono text-right text-sm text-green-400">{details.tp1}</TableCell>
+                      <TableCell className="font-mono text-right text-sm text-green-400/80">{details.tp2}</TableCell>
+                      <TableCell className="font-mono text-right text-sm text-green-400/60">{details.tp3}</TableCell>
+                      <TableCell className="text-center">
+                        <div className="flex items-center justify-center gap-1">
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-[8px] text-muted-foreground">TP1</span>
+                            {getTpPill("TP1", tradesList)}
+                          </div>
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-[8px] text-muted-foreground">TP2</span>
+                            {getTpPill("TP2", tradesList)}
+                          </div>
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-[8px] text-muted-foreground">TP3</span>
+                            {getTpPill("TP3", tradesList)}
+                          </div>
+                          {tradesList.some((t: any) => t.comment && t.comment.includes("HEDGE")) && (
+                            <div className="flex flex-col gap-0.5">
+                              <span className="text-[8px] text-muted-foreground">HEDGE</span>
+                              {getHedgePill(tradesList)}
+                            </div>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="font-mono text-right text-sm text-muted-foreground">
+                        {sig.totalLots !== undefined ? sig.totalLots.toFixed(2) : "-"}
+                      </TableCell>
+                      <TableCell className={cn(
+                        "font-mono text-right text-sm font-semibold",
+                        totalProfitVal != null ? (totalProfitVal >= 0 ? "text-green-500" : "text-red-500") : "text-muted-foreground"
+                      )}>
+                        {totalProfitVal != null ? (totalProfitVal >= 0 ? "+" : "") + totalProfitVal.toFixed(2) : "-"}
+                      </TableCell>
+                      <TableCell className={cn(
+                        "font-mono text-right font-bold text-sm",
+                        Math.abs(sig.zScore) >= 2 ? (sig.zScore > 0 ? "text-red-500" : "text-green-500") : "text-foreground"
+                      )}>
+                        {sig.zScore.toFixed(3)}
+                      </TableCell>
+                      <TableCell className="text-center">
+                        <div className="flex items-center justify-center gap-1.5">
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleExecuteSignal(sig);
+                            }}
+                            size="sm"
+                            className="bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-[10px] font-bold h-7 px-2"
+                            disabled={executeTrade.isPending || isReadOnly}
+                          >
+                            [FAST] EXECUTE
+                          </Button>
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCopySignal(sig);
+                            }}
+                            size="sm"
+                            className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 font-mono text-[10px] font-bold h-7 px-2"
+                          >
+                            [COPY] COPY
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
