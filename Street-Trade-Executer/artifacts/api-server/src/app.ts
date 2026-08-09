@@ -46,7 +46,7 @@ app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use("/api", router);
 
 // Serve static frontend files from Vite build output
-const clientDistPath = path.resolve(__dirname, "../../trading-dashboard/dist/public");
+const clientDistPath = path.resolve(__dirname, "../../trading-dashboard/dist");
 app.use(express.static(clientDistPath));
 
 // For all non-API routes, serve index.html (supports client-side routing)
