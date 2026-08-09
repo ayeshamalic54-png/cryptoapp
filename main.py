@@ -1606,8 +1606,11 @@ def main():
                     kf_pair.state_covariance = np.identity(2) * 1.0
                     beta, alpha, spread, z = kf_pair.update(p_b, p_a)
 
-                # SMC update (Only run if SMC Confluence is enabled on Dashboard)
-                if REQUIRE_SMC_CONFLUENCE:
+                is_focus_pair = (pk.upper().strip() == current_pair_context.upper().strip() or pk.upper().strip() == f"{S_A}/{S_B}".upper().strip())
+                base_z_triggered = (abs(z) > Z_ENTRY_THRESHOLD)
+
+                # SMC update (Only fetch candles for active focus pair or potential signal candidates)
+                if REQUIRE_SMC_CONFLUENCE and (is_focus_pair or base_z_triggered):
                     if s_a_resolved not in SMC_ZONES_CACHE or smc_counter_cache.get(s_a_resolved, 0) >= 15:
                         try:
                             if cat_a == "crypto":
@@ -1623,10 +1626,10 @@ def main():
                     else:
                         smc_counter_cache[s_a_resolved] = smc_counter_cache.get(s_a_resolved, 0) + 1
 
-                # OBI calculation
+                # OBI calculation (Only fetch orderbook depth for active focus pair or potential signal candidates)
                 bids_a_scan, asks_a_scan = [], []
                 bids_b_scan, asks_b_scan = [], []
-                if OBI_ENABLED:
+                if OBI_ENABLED and (is_focus_pair or base_z_triggered):
                     try:
                         if cat_a == "crypto":
                             bids_a_scan, asks_a_scan = get_binance_market_book(s_a_resolved)
