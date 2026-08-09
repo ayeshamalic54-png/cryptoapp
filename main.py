@@ -2106,29 +2106,14 @@ def main():
                 trades_count=trades_today,
             )
 
-            if loop_log_counter % 15 == 0:
-                try:
-                    summary_parts = []
-                    conn_scan = get_connection()
-                    cur_scan = conn_scan.cursor()
-                    cur_scan.execute("SELECT symbol_pair, z_score FROM scanned_assets ORDER BY symbol_pair")
-                    scanned_rows = cur_scan.fetchall()
-                    cur_scan.close()
-                    conn_scan.close()
-                    for pair_name, z_val in scanned_rows:
-                        summary_parts.append(f"{pair_name}: {float(z_val):.2f}")
-                    scan_summary_str = " | ".join(summary_parts) if summary_parts else "Scanning..."
-                    logger.info(f"[LIVE SCAN SUMMARY] {scan_summary_str}")
-                except Exception as ex_sum:
-                    logger.error(f"Error compiling scan summary log: {ex_sum}")
-
-                smc_str = f"SMC: [{'ENABLED' if REQUIRE_SMC_CONFLUENCE else 'OFF'}]"
-                obi_str = f"OBI: [{'ENABLED' if OBI_ENABLED else 'OFF'}] ({active_pair_obi_a:.1f}/{active_pair_obi_b:.1f})"
-                logger.info(
-                    f"[LIVE SCAN DETAIL] Active Focus: {current_pair_context} | Z-Score: {active_pair_z_score:.3f} "
-                    f"| Z-Vel: {active_pair_velocity:.3f} | {smc_str} | {obi_str} "
-                    f"| Status: {status_str}"
-                )
+            # Log live scanning detail on every iteration so VPS console shows continuous active scanning
+            smc_str = f"SMC: [{'ENABLED' if REQUIRE_SMC_CONFLUENCE else 'OFF'}]"
+            obi_str = f"OBI: [{'ENABLED' if OBI_ENABLED else 'OFF'}] (A:{active_pair_obi_a:.2f}/B:{active_pair_obi_b:.2f})"
+            logger.info(
+                f"[LIVE SCAN DETAIL] Focus: {current_pair_context} | Z-Score: {active_pair_z_score:+.3f} "
+                f"| Z-Entry: ±{Z_ENTRY_THRESHOLD:.2f} | Z-Vel: {active_pair_velocity:+.3f} | {smc_str} | {obi_str} "
+                f"| Status: {status_str}"
+            )
             loop_log_counter += 1
 
         except Exception as loop_err:
