@@ -1579,6 +1579,11 @@ def main():
                 except Exception:
                     continue
 
+                if (tick_a_scan is None or getattr(tick_a_scan, "ask", 0.0) <= 0.0) and cat_a == "crypto":
+                    tick_a_scan = bulk_ticks.get("BTCUSDT") or get_binance_live_tick("BTCUSDT")
+                if (tick_b_scan is None or getattr(tick_b_scan, "ask", 0.0) <= 0.0) and cat_b == "crypto":
+                    tick_b_scan = bulk_ticks.get("ETHUSDT") or get_binance_live_tick("ETHUSDT")
+
                 if tick_a_scan is None or tick_b_scan is None:
                     continue
 
