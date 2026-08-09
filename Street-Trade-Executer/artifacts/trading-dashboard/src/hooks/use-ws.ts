@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { getWsUrl } from "@/lib/api";
 
 export interface WsDashboardData {
   systemStatus: string;
@@ -67,8 +68,7 @@ export function useLiveDashboard() {
   const connect = useCallback(() => {
     if (!mountedRef.current) return;
 
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws`);
+    const ws = new WebSocket(getWsUrl("/api/ws"));
     wsRef.current = ws;
 
     ws.onopen = () => {

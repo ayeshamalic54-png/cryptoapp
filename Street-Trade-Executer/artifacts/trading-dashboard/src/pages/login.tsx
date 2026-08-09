@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Lock, User, ShieldAlert } from "lucide-react";
+import { getApiUrl } from "@/lib/api";
 
 export default function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
   const [username, setUsername] = useState("");
@@ -16,7 +17,7 @@ export default function Login({ onLoginSuccess }: { onLoginSuccess: () => void }
     setError("");
     setIsLoading(true);
 
-    fetch("/api/login", {
+    fetch(getApiUrl("/api/login"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password })

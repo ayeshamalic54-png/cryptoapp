@@ -6,6 +6,8 @@ import { useToast } from "@/hooks/use-toast";
 import { Database, Download, Upload, AlertTriangle } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
+import { getApiUrl } from "@/lib/api";
+
 export default function Backup() {
   const { toast } = useToast();
   const [file, setFile] = useState<File | null>(null);
@@ -14,7 +16,7 @@ export default function Backup() {
 
   const handleExport = () => {
     // Standard fetch/download for JSON backup file
-    window.location.href = "/api/backup/export";
+    window.location.href = getApiUrl("/api/backup/export");
     toast({
       title: "[ENTRY/BACKUP] Backup Export Started",
       description: "Downloading your database backup file.",
@@ -59,7 +61,7 @@ export default function Backup() {
         try {
           const json = JSON.parse(event.target?.result as string);
           
-          const res = await fetch("/api/backup/import", {
+          const res = await fetch(getApiUrl("/api/backup/import"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(json),

@@ -38,6 +38,8 @@ interface BacktestResponse {
   trades: Array<TradeSim>;
 }
 
+import { getApiUrl } from "@/lib/api";
+
 export default function Backtest() {
   const { toast } = useToast();
   const isReadOnly = localStorage.getItem("wasee_role") === "user";
@@ -57,7 +59,7 @@ export default function Backtest() {
     }
     setLoading(true);
     try {
-      const res = await fetch("/api/backtest", {
+      const res = await fetch(getApiUrl("/api/backtest"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

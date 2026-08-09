@@ -62,6 +62,8 @@ const FUNDED_NEXT_RULES = [
   { rule: "Min Trading Days", value: "5 separate days (Comp)", botValue: "Runs continuously to meet days", safe: true },
 ];
 
+import { getApiUrl } from "@/lib/api";
+
 export default function Config() {
   const { toast } = useToast();
   const [currentPass, setCurrentPass] = useState("");
@@ -80,7 +82,7 @@ export default function Config() {
     }
 
     try {
-      const res = await fetch("/api/config/password", {
+      const res = await fetch(getApiUrl("/api/config/password"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ currentPassword: currentPass, newPassword: newPass }),
