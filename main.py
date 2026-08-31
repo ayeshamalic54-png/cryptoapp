@@ -1606,14 +1606,15 @@ def main():
                 kf_pair = get_kf_for_pair(s_a_resolved, s_b_resolved)
                 beta, alpha, spread, z = kf_pair.update(p_b, p_a)
 
-                # Re-anchor Kalman Filter if Z-score is an unanchored outlier anomaly (> 10.0)
-                if abs(z) > 10.0:
+                # Re-anchor Kalman Filter if Z-score is an unanchored outlier anomaly (> 5.0)
+                if abs(z) > 5.0:
                     import numpy as np
                     kf_pair.ref_x = float(p_b)
                     kf_pair.ref_y = float(p_a)
                     kf_pair.state_mean = np.array([1.0, 0.0])
                     kf_pair.state_covariance = np.identity(2) * 1.0
                     beta, alpha, spread, z = kf_pair.update(p_b, p_a)
+                z = max(-5.0, min(5.0, float(z)))
 
                 is_focus_pair = (pk.upper().strip() == current_pair_context.upper().strip() or pk.upper().strip() == f"{S_A}/{S_B}".upper().strip())
                 base_z_triggered = (abs(z) > Z_ENTRY_THRESHOLD)
