@@ -153,9 +153,10 @@ def save_config(pair_str):
     except Exception as e:
         logger.error(f"Error saving config: {e}")
 
-KNIFE_PROTECTION_ENABLED = True
-OBI_ENABLED = True
-VOLATILITY_FILTER_ENABLED = True
+KNIFE_PROTECTION_ENABLED = False
+OBI_ENABLED = False
+VOLATILITY_FILTER_ENABLED = False
+REQUIRE_SMC_CONFLUENCE = False
 
 def fetch_db_config():
     """
@@ -208,9 +209,9 @@ def fetch_db_config():
                 float(row[10] or 2.0),
                 float(row[11] or 0.00),
                 int(row[12] or 3),
-                bool(row[13] if row[13] is not None else True),
-                bool(row[14] if row[14] is not None else True),
-                bool(row[15] if row[15] is not None else True),
+                False,  # knife_protection_enabled = False for dedicated Video 2 strategy
+                False,  # obi_enabled = False for dedicated Video 2 strategy
+                False,  # volatility_filter_enabled = False for dedicated Video 2 strategy
             )
         else:
             cur.close()
