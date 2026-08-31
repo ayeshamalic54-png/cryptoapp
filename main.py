@@ -1843,21 +1843,12 @@ def main():
                             if usdt_bal <= 0:
                                 usdt_bal = 100.0  # Fallback safety balance
 
-                            if DEFAULT_LOTS > 0.0001:
-                                qty_a = float(DEFAULT_LOTS)
-                            else:
-                                # Deploy 80% of available USDT margin balance at 20x leverage on Binance Futures
-                                margin_alloc = usdt_bal * 0.80
-                                notional_val = margin_alloc * 20.0
-                                qty_a = float(notional_val / best_sig["price_a"])
-                                
-                            filters_a = get_symbol_filters(S_A)
-                            if filters_a:
-                                step_size = filters_a.get("stepSize", 0.001)
-                                qty_prec = filters_a.get("quantityPrecision", 3)
-                                qty_a = round(round(qty_a / step_size) * step_size, qty_prec)
-                                if qty_a < step_size * 3.0:
-                                    qty_a = step_size * 3.0
+                            usdt_bal, _ = get_binance_usdt_balance()
+                            if usdt_bal <= 0:
+                                usdt_bal = acc_info.equity if (acc_info and getattr(acc_info, 'equity', 0) > 0) else 10678.0
+
+                            from binance_execution import calculate_binance_full_equity_quantity
+                            qty_a = calculate_binance_full_equity_quantity(S_A, best_sig["price_a"], usdt_bal, max_margin_pct=75.0)
                                 
                             qty_b = get_hedge_quantity(S_A, S_B, qty_a, best_sig["beta"], best_cat_a, best_cat_b)
                             
@@ -1935,23 +1926,10 @@ def main():
                         if best_cat_a == "crypto":
                             usdt_bal, _ = get_binance_usdt_balance()
                             if usdt_bal <= 0:
-                                usdt_bal = 100.0  # Fallback safety balance
+                                usdt_bal = acc_info.equity if (acc_info and getattr(acc_info, 'equity', 0) > 0) else 10678.0
 
-                            if DEFAULT_LOTS > 0.0001:
-                                qty_a = float(DEFAULT_LOTS)
-                            else:
-                                # Deploy 80% of available USDT margin balance at 20x leverage on Binance Futures
-                                margin_alloc = usdt_bal * 0.80
-                                notional_val = margin_alloc * 20.0
-                                qty_a = float(notional_val / best_sig["price_a"])
-                                
-                            filters_a = get_symbol_filters(S_A)
-                            if filters_a:
-                                step_size = filters_a.get("stepSize", 0.001)
-                                qty_prec = filters_a.get("quantityPrecision", 3)
-                                qty_a = round(round(qty_a / step_size) * step_size, qty_prec)
-                                if qty_a < step_size * 3.0:
-                                    qty_a = step_size * 3.0
+                            from binance_execution import calculate_binance_full_equity_quantity
+                            qty_a = calculate_binance_full_equity_quantity(S_A, best_sig["price_a"], usdt_bal, max_margin_pct=75.0)
                                 
                             qty_b = get_hedge_quantity(S_A, S_B, qty_a, best_sig["beta"], best_cat_a, best_cat_b)
                             

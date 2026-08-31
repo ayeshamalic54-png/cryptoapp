@@ -144,6 +144,36 @@ def get_binance_usdt_balance():
             logger.error(f"Failed to fetch Binance Futures account info: {err_msg}")
     return 0.0, 0.0
 
+def calculate_binance_full_equity_quantity(symbol: str, entry_price: float, usdt_equity: float, max_margin_pct: float = 75.0) -> float:
+    """
+    Calculates dynamic Futures quantity using full account equity (e.g. $10,678 USDT balance),
+    ensuring total margin used is capped to max 75.0%-80.0% of total account equity to prevent liquidation.
+    """
+    if entry_price <= 0 or usdt_equity <= 0:
+        return 0.0
+    
+    filters = get_symbol_filters(symbol)
+    if not filters:
+        return round((usdt_equity * (max_margin_pct / 100.0)) / entry_price, 3)
+
+    allocated_usdt = usdt_equity * (max_margin_pct / 100.0)
+    raw_qty = allocated_usdt / entry_price
+
+    step_size = filters.get("stepSize", 0.001)
+    max_qty = filters.get("maxQty", 1000000.0)
+    min_qty = filters.get("minQty", step_size)
+    qty_prec = filters.get("quantityPrecision", 3)
+
+    rounded_qty = round(round(raw_qty / step_size) * step_size, qty_prec)
+
+    if rounded_qty > max_qty:
+        rounded_qty = max_qty
+    if rounded_qty < min_qty:
+        rounded_qty = min_qty
+
+    logger.info(f"💰 [FULL EQUITY MARGIN CAP] Equity: ${usdt_equity:.2f} USDT | Allocated Margin (75%-80% Cap): ${allocated_usdt:.2f} USDT | Entry: ${entry_price:.5f} | Quantity: {rounded_qty} {symbol}")
+    return rounded_qty
+
 def calculate_binance_quantity(symbol, sl_distance_price, usdt_balance, risk_pct=1.0):
     """Calculates risk-based lot sizing for Binance Futures trading safely clamped to exchangeInfo LOT_SIZE rules."""
     if sl_distance_price <= 0:
