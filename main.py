@@ -79,6 +79,7 @@ from data_ingestion import initialize_mt5, check_and_subscribe_symbol, get_live_
 from risk_safeguards import check_drawdown_limit, calculate_lots, is_spread_valid, get_trades_count_today, MAX_DAILY_TRADES, invalidate_trades_cache, round_volume
 from execution_bot import execute_three_part_trade, close_all_positions, modify_sl_for_trade, check_closed_trades, MAGIC_NUMBER, send_order, close_position_by_ticket
 from smc_indicators import detect_smc_zones, is_price_in_zones
+from video_strategy_engine import calculate_zscore_and_ema, evaluate_video_strategy_signal
 from database import log_signal, get_connection, update_bot_state, update_daily_metrics, log_fvg_zones, get_auto_execute, initialize_database, log_trade_entry, get_open_trades_count, log_trade_exit, update_scanned_asset
 from binance_execution import (
     get_binance_usdt_balance,
@@ -423,17 +424,27 @@ CANDIDATE_PAIRS = {
     ],
     "crypto": [
         ("BTCUSDT", "ETHUSDT"),
-        ("SOLUSDT", "AVAXUSDT"),
-        ("ADAUSDT", "XRPUSDT"),
-        ("DOGEUSDT", "SHIBUSDT"),
-        ("LINKUSDT", "DOTUSDT"),
-        ("UNIUSDT", "AAVEUSDT"),
-        ("LTCUSDT", "BCHUSDT"),
-        ("ARBUSDT", "OPUSDT"),
-        ("APTUSDT", "SUIUSDT"),
-        ("NEARUSDT", "BTCUSDT"),
-        ("FETUSDT", "RENDERUSDT"),
-        ("TRXUSDT", "XRPUSDT")
+        ("SOLUSDT", "BTCUSDT"),
+        ("ETHUSDT", "SOLUSDT"),
+        ("BNBUSDT", "BTCUSDT"),
+        ("XRPUSDT", "BTCUSDT"),
+        ("DOGEUSDT", "SOLUSDT"),
+        ("AVAXUSDT", "SOLUSDT"),
+        ("LINKUSDT", "ETHUSDT"),
+        ("NEARUSDT", "SOLUSDT"),
+        ("SUIUSDT", "SOLUSDT"),
+        ("APTUSDT", "ETHUSDT"),
+        ("FETUSDT", "SOLUSDT"),
+        ("INJUSDT", "SOLUSDT"),
+        ("TIAUSDT", "SOLUSDT"),
+        ("SEIUSDT", "SOLUSDT"),
+        ("PEPEUSDT", "DOGEUSDT"),
+        ("SHIBUSDT", "DOGEUSDT"),
+        ("WIFUSDT", "SOLUSDT"),
+        ("FLOKIUSDT", "DOGEUSDT"),
+        ("RENDERUSDT", "SOLUSDT"),
+        ("ARBUSDT", "ETHUSDT"),
+        ("ADAUSDT", "BTCUSDT"),
     ],
     "indices": [
         ("AAPL", "MSFT"),
@@ -1666,78 +1677,23 @@ def main():
                 z_velocity = kf_pair.get_velocity(k=3)
                 dynamic_z_entry = kf_pair.get_dynamic_z_entry(Z_ENTRY_THRESHOLD)
 
-                if cat_a == "forex":
-                    z_vel_lim = 0.02
-                elif cat_a == "metals":
-                    z_vel_lim = 0.08
-                else:
-                    z_vel_lim = 0.05
+                df_a = get_binance_rates_df(s_a_resolved, timeframe_minutes=15, count=220)
+                if df_a is not None and not df_a.empty:
+                    df_a = calculate_zscore_and_ema(df_a)
 
                 action = "NONE"
-                if Z_ENTRY_THRESHOLD <= 0.5:
-                    # Raw Test Mode: Bypass all safety filters for instant verification
-                    if z < -Z_ENTRY_THRESHOLD:
-                        action = "BUY_SPREAD"
-                    elif z > Z_ENTRY_THRESHOLD:
-                        action = "SELL_SPREAD"
-                else:
-                    # Safe Mode: Apply protections based on Dashboard toggle switches
-                    pass_z_buy = (z < -dynamic_z_entry) if VOLATILITY_FILTER_ENABLED else (z < -Z_ENTRY_THRESHOLD)
-                    pass_z_sell = (z > dynamic_z_entry) if VOLATILITY_FILTER_ENABLED else (z > Z_ENTRY_THRESHOLD)
-                    
-                    pass_vel_buy = (z_velocity > -z_vel_lim) if KNIFE_PROTECTION_ENABLED else True
-                    pass_vel_sell = (z_velocity < z_vel_lim) if KNIFE_PROTECTION_ENABLED else True
-                    
-                    pass_obi_buy = obi_buy_pass if OBI_ENABLED else True
-                    pass_obi_sell = obi_sell_pass if OBI_ENABLED else True
-                    
-                    pass_smc_buy = in_bullish_zone if REQUIRE_SMC_CONFLUENCE else True
-                    pass_smc_sell = in_bearish_zone if REQUIRE_SMC_CONFLUENCE else True
+                vid_sig, vid_tp, vid_sl, vid_sl_dist, vid_reason = evaluate_video_strategy_signal(df_a, z_threshold=Z_ENTRY_THRESHOLD, category="crypto", live_z=z)
 
-                    if pass_z_buy and pass_vel_buy and pass_obi_buy and pass_smc_buy:
-                        action = "BUY_SPREAD"
-                    elif pass_z_sell and pass_vel_sell and pass_obi_sell and pass_smc_sell:
-                        action = "SELL_SPREAD"
+                if vid_sig == "BUY":
+                    action = "BUY_SPREAD"
+                elif vid_sig == "SELL":
+                    action = "SELL_SPREAD"
 
-                # Validate beta sign and magnitude to prevent same-side hedge order anomalies
-                if action != "NONE":
-                    expected_sign = EXPECTED_BETA_SIGN.get(pk, 1)
-                    beta_sign = 1 if beta >= 0 else -1
-                    if beta_sign != expected_sign:
-                        if cat_a == "crypto" and abs(beta) < 0.05:
-                            pass
-                        else:
-                            logger.warning(f"Correlation anomaly for {pk}: estimated beta {beta:.4f} has wrong sign (expected {expected_sign}). Skipping signal.")
-                            action = "NONE"
-                    elif cat_a != "crypto" and abs(beta) < 0.05:
-                        logger.warning(f"Hedge ratio too low for {pk}: beta {beta:.4f}. Skipping signal.")
-                        action = "NONE"
-
-                # Debug log why signal was skipped if base Z threshold was crossed but action is NONE
                 base_z_triggered = (z < -Z_ENTRY_THRESHOLD) or (z > Z_ENTRY_THRESHOLD)
                 if base_z_triggered and action == "NONE":
-                    reasons = []
-                    if z < -Z_ENTRY_THRESHOLD:
-                        if VOLATILITY_FILTER_ENABLED and not (z < -dynamic_z_entry):
-                            reasons.append(f"Z-score {z:.3f} not below dynamic threshold {-dynamic_z_entry:.3f} (volatility protection)")
-                        if KNIFE_PROTECTION_ENABLED and not (z_velocity > -z_vel_lim):
-                            reasons.append(f"Z-velocity {z_velocity:.3f} too fast (falling knife protection, limit: {-z_vel_lim})")
-                        if OBI_ENABLED and not obi_buy_pass:
-                            reasons.append(f"OBI {net_obi:.3f} too low (min: 0.15)")
-                        if REQUIRE_SMC_CONFLUENCE and not in_bullish_zone:
-                            reasons.append("Price not in Bullish SMC Zone (Order Block/FVG)")
-                    else:
-                        if VOLATILITY_FILTER_ENABLED and not (z > dynamic_z_entry):
-                            reasons.append(f"Z-score {z:.3f} not above dynamic threshold {dynamic_z_entry:.3f} (volatility protection)")
-                        if KNIFE_PROTECTION_ENABLED and not (z_velocity < z_vel_lim):
-                            reasons.append(f"Z-velocity {z_velocity:.3f} too fast (rising knife protection, limit: {z_vel_lim})")
-                        if OBI_ENABLED and not obi_sell_pass:
-                            reasons.append(f"OBI {net_obi:.3f} too high (max: -0.15)")
-                        if REQUIRE_SMC_CONFLUENCE and not in_bearish_zone:
-                            reasons.append("Price not in Bearish SMC Zone (Order Block/FVG)")
-                    
-                    if reasons:
-                        logger.debug(f"Signal threshold crossed for {pk} (Z={z:.3f}), but skipped due to: {', '.join(reasons)}")
+                    logger.info(f"🔄 [ENTRY SKIPPED LOG] Z-Threshold crossed for {pk} (Z={z:.3f} vs Limit ±{Z_ENTRY_THRESHOLD:.2f}), but entry deferred: {vid_reason}")
+
+                logger.info(f"📊 [PROBABILITY Z-CORE SCAN] {pk} | {vid_reason} | Target Plan: 1:2.5 RRR 🟢")
 
                 # Fast non-blocking win rate lookup
                 if pk not in WIN_RATE_CACHE:
