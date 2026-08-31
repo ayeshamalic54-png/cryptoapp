@@ -394,7 +394,7 @@ def poll_manual_commands(tick_a, tick_b, sl_pips: float):
                 pass
 
 
-Z_ENTRY_THRESHOLD = 3.00
+Z_ENTRY_THRESHOLD = 5.00
 ML_MODEL = None
 DEFAULT_LOTS = 0.01
 Z_EXIT_MEAN = 0.0
@@ -1673,7 +1673,7 @@ def main():
                         for k in ['bearish_ob', 'bearish_breaker', 'bearish_fvg', 'bearish_ifvg']
                     )
 
-                z_velocity = kf_pair.get_velocity(k=3)
+                z_velocity = 0.0
                 dynamic_z_entry = kf_pair.get_dynamic_z_entry(Z_ENTRY_THRESHOLD)
 
                 df_a = get_binance_rates_df(s_a_resolved, timeframe_minutes=15, count=220)
@@ -1718,7 +1718,7 @@ def main():
                     active_pair_beta = beta
                     active_pair_obi_a = obi_a
                     active_pair_obi_b = obi_b
-                    active_pair_velocity = z_velocity
+                    active_pair_velocity = 0.0
 
                 # Cooldown checks
                 cooldown_dir = COOLDOWN_DIRECTIONS.get(pk)
