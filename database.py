@@ -465,7 +465,7 @@ def send_discord_message(content):
     """Sends a general plain text message or embed to the Discord Webhook for Crypto App."""
     import os
     import requests
-    webhook_url = os.getenv("CRYPTO_DISCORD_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK_URL")
+    webhook_url = os.getenv("CRYPTO_DISCORD_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK_URL") or "https://discord.com/api/webhooks/1541691216721092650/FeVH_TsPthychj-dgJoKFy0f9equhQ0bppG2rKgUnLO1JhvnS1SLtW5HToadUwK0gDth"
     if not webhook_url:
         return False
     try:
