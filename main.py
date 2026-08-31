@@ -1850,37 +1850,12 @@ def main():
                             from binance_execution import calculate_binance_full_equity_quantity
                             qty_a = calculate_binance_full_equity_quantity(S_A, best_sig["price_a"], usdt_bal, max_margin_pct=75.0)
                                 
-                            qty_b = get_hedge_quantity(S_A, S_B, qty_a, best_sig["beta"], best_cat_a, best_cat_b)
-                            
                             if execute_three_part_binance_trade(
                                 S_A, True, best_sig["tick_a"].ask, best_sig["tick_a"].ask - sl_dist, qty_a,
                                 best_sig["price_a"] + tp_dist * 0.5, best_sig["price_a"] + tp_dist, best_sig["price_a"] + tp_dist * 1.5,
                                 signal_id=signal_id
                             ):
-                                order_type_b, side_b, price_b, sl_sign_b = get_hedge_execution_parameters(best_action, best_sig["beta"], best_sig["tick_b"])
-                                sl_b = price_b + sl_sign_b * sl_dist_b
-                                if best_cat_b == "crypto":
-                                    hedge_params = {"symbol": S_B, "side": side_b, "type": "MARKET", "quantity": qty_b}
-                                    h_res = send_signed_request("POST", "/fapi/v1/order", hedge_params)
-                                    if h_res and h_res.status_code == 200:
-                                        avg_price_b = float(h_res.json().get("avgPrice") or price_b)
-                                        log_trade_entry(h_res.json()["orderId"], S_B, side_b, qty_b, avg_price_b, datetime.datetime.now(), "Binance JS_HEDGE", signal_id)
-                                        price_prec = get_symbol_filters(S_B)["pricePrecision"] if get_symbol_filters(S_B) else 2
-                                        qty_prec_b = get_symbol_filters(S_B)["quantityPrecision"] if get_symbol_filters(S_B) else 3
-                                        opp_side_b = "BUY" if side_b == "SELL" else "SELL"
-                                        send_signed_request("POST", "/fapi/v1/algoOrder", {
-                                            "algoType": "CONDITIONAL",
-                                            "symbol": S_B,
-                                            "side": opp_side_b,
-                                            "type": "STOP_MARKET",
-                                            "triggerPrice": round(sl_b, price_prec),
-                                            "quantity": round(qty_b, qty_prec_b),
-                                            "reduceOnly": "true"
-                                        })
-                                else:
-                                    res_hedge = send_order(S_B, order_type_b, price_b, qty_b, sl_b, 0.0, "JS_HEDGE")
-                                    if res_hedge and res_hedge.retcode == mt5.TRADE_RETCODE_DONE:
-                                        log_trade_entry(res_hedge.order, S_B, side_b, qty_b, res_hedge.price, datetime.datetime.now(), "JS_HEDGE", signal_id)
+                                logger.info(f"🟢 [SINGLE DIRECTIONAL ORDER EXECUTED] Primary Symbol {S_A} (Single Leg, No Hedge Order B) | Quantity: {qty_a}")
                         else:
                             lots_a = DEFAULT_LOTS if DEFAULT_LOTS > 0 else calculate_lots(S_A, sl_dist, acc_info)
                             # Apply 3-part safeguard scaling correction
@@ -1931,37 +1906,12 @@ def main():
                             from binance_execution import calculate_binance_full_equity_quantity
                             qty_a = calculate_binance_full_equity_quantity(S_A, best_sig["price_a"], usdt_bal, max_margin_pct=75.0)
                                 
-                            qty_b = get_hedge_quantity(S_A, S_B, qty_a, best_sig["beta"], best_cat_a, best_cat_b)
-                            
                             if execute_three_part_binance_trade(
                                 S_A, False, best_sig["tick_a"].bid, best_sig["tick_a"].bid + sl_dist, qty_a,
                                 max(0.0001, best_sig["price_a"] - tp_dist * 0.5), max(0.0001, best_sig["price_a"] - tp_dist), max(0.0001, best_sig["price_a"] - tp_dist * 1.5),
                                 signal_id=signal_id
                             ):
-                                order_type_b, side_b, price_b, sl_sign_b = get_hedge_execution_parameters(best_action, best_sig["beta"], best_sig["tick_b"])
-                                sl_b = price_b + sl_sign_b * sl_dist_b
-                                if best_cat_b == "crypto":
-                                    hedge_params = {"symbol": S_B, "side": side_b, "type": "MARKET", "quantity": qty_b}
-                                    h_res = send_signed_request("POST", "/fapi/v1/order", hedge_params)
-                                    if h_res and h_res.status_code == 200:
-                                        avg_price_b = float(h_res.json().get("avgPrice") or price_b)
-                                        log_trade_entry(h_res.json()["orderId"], S_B, side_b, qty_b, avg_price_b, datetime.datetime.now(), "Binance JS_HEDGE", signal_id)
-                                        price_prec = get_symbol_filters(S_B)["pricePrecision"] if get_symbol_filters(S_B) else 2
-                                        qty_prec_b = get_symbol_filters(S_B)["quantityPrecision"] if get_symbol_filters(S_B) else 3
-                                        opp_side_b = "BUY" if side_b == "SELL" else "SELL"
-                                        send_signed_request("POST", "/fapi/v1/algoOrder", {
-                                            "algoType": "CONDITIONAL",
-                                            "symbol": S_B,
-                                            "side": opp_side_b,
-                                            "type": "STOP_MARKET",
-                                            "triggerPrice": round(sl_b, price_prec),
-                                            "quantity": round(qty_b, qty_prec_b),
-                                            "reduceOnly": "true"
-                                        })
-                                else:
-                                    res_hedge = send_order(S_B, order_type_b, price_b, qty_b, sl_b, 0.0, "JS_HEDGE")
-                                    if res_hedge and res_hedge.retcode == mt5.TRADE_RETCODE_DONE:
-                                        log_trade_entry(res_hedge.order, S_B, side_b, qty_b, res_hedge.price, datetime.datetime.now(), "JS_HEDGE", signal_id)
+                                logger.info(f"🔴 [SINGLE DIRECTIONAL ORDER EXECUTED] Primary Symbol {S_A} (Single Leg, No Hedge Order B) | Quantity: {qty_a}")
                         else:
                             lots_a = DEFAULT_LOTS if DEFAULT_LOTS > 0 else calculate_lots(S_A, sl_dist, acc_info)
                             # Apply 3-part safeguard scaling correction
