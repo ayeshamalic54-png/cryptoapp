@@ -1993,11 +1993,9 @@ def main():
             )
 
             # Log live scanning detail on every iteration so VPS console shows continuous active scanning
-            smc_str = f"SMC: [{'ENABLED' if REQUIRE_SMC_CONFLUENCE else 'OFF'}]"
-            obi_str = f"OBI: [{'ENABLED' if OBI_ENABLED else 'OFF'}] (A:{active_pair_obi_a:.2f}/B:{active_pair_obi_b:.2f})"
             logger.info(
                 f"[LIVE SCAN DETAIL] Focus: {current_pair_context} | Z-Score: {active_pair_z_score:+.3f} "
-                f"| Z-Entry: ±{Z_ENTRY_THRESHOLD:.2f} | Z-Vel: {active_pair_velocity:+.3f} | {smc_str} | {obi_str} "
+                f"| Z-Entry: ±{Z_ENTRY_THRESHOLD:.2f} | Z-Vel: [OFF] | SMC: [OFF] | OBI: [OFF] "
                 f"| Status: {status_str}"
             )
             loop_log_counter += 1
