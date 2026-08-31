@@ -25,7 +25,7 @@ def calculate_zscore_and_ema(df: pd.DataFrame, period: int = 14, ema_period: int
     df['tp_std'] = df['typical_price'].rolling(window=period, min_periods=5).std()
 
     # 4. VWAP Z-Score
-    df['tp_std_clean'] = df['tp_std'].replace(0, np.nan).fillna(method='bfill').fillna(0.00001)
+    df['tp_std_clean'] = df['tp_std'].replace(0, np.nan).bfill().fillna(0.00001)
     df['vwap_zscore'] = (df['typical_price'] - df['tp_sma']) / df['tp_std_clean']
     df['vwap_zscore'] = df['vwap_zscore'].clip(-5.0, 5.0)
 

@@ -1380,10 +1380,7 @@ def main():
             if METALS_ENABLED:
                 pairs_to_scan.extend(CANDIDATE_PAIRS["metals"])
             if CRYPTO_ENABLED:
-                if DYNAMIC_CRYPTO_PAIRS:
-                    pairs_to_scan.extend(DYNAMIC_CRYPTO_PAIRS)
-                else:
-                    pairs_to_scan.extend(CANDIDATE_PAIRS["crypto"])
+                pairs_to_scan.extend(CANDIDATE_PAIRS["crypto"])
             if INDICES_ENABLED:
                 pairs_to_scan.extend(CANDIDATE_PAIRS["indices"])
 
