@@ -1688,7 +1688,7 @@ def main():
                 elif vid_sig == "SELL":
                     action = "SELL_SPREAD"
 
-                base_z_triggered = (z < -Z_ENTRY_THRESHOLD) or (z > Z_ENTRY_THRESHOLD)
+                base_z_triggered = (abs(z) >= 2.20)
                 if base_z_triggered and action == "NONE":
                     logger.info(f"🔄 [ENTRY SKIPPED LOG] Z-Threshold crossed for {pk} (Z={z:.3f} vs Limit ±{Z_ENTRY_THRESHOLD:.2f}), but entry deferred: {vid_reason}")
 
