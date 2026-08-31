@@ -34,13 +34,25 @@ def sync_binance_time():
 
 sync_binance_time()
 
+def resolve_binance_symbol(symbol: str) -> str:
+    """Maps standard coin symbols to Binance Futures contract names (e.g. PEPEUSDT -> 1000PEPEUSDT)."""
+    s = str(symbol).upper().strip()
+    mapping = {
+        "PEPEUSDT": "1000PEPEUSDT",
+        "SHIBUSDT": "1000SHIBUSDT",
+        "FLOKIUSDT": "1000FLOKIUSDT",
+        "BONKUSDT": "1000BONKUSDT",
+        "LUNCUSDT": "1000LUNCUSDT",
+    }
+    return mapping.get(s, s)
+
 # Cache for Binance symbol precision and filter details
 exchange_info_cache = {}
 
 def get_symbol_filters(symbol):
     """Fetches precision and step filters for a symbol from Binance Futures exchangeInfo."""
     global exchange_info_cache
-    s_upper = symbol.upper()
+    s_upper = resolve_binance_symbol(symbol)
     if s_upper in exchange_info_cache:
         return exchange_info_cache[s_upper]
     try:
@@ -444,7 +456,7 @@ def get_all_binance_ticks():
 
 def get_binance_live_tick(symbol):
     """Fetches the latest tick (bid, ask) for a symbol from Binance Futures using 50ms batch lookup."""
-    sym_upper = symbol.upper()
+    sym_upper = resolve_binance_symbol(symbol)
     all_ticks = get_all_binance_ticks()
     if sym_upper in all_ticks:
         return all_ticks[sym_upper]
@@ -491,7 +503,7 @@ def get_binance_rates_df(symbol, timeframe_minutes=5, count=100):
     
     try:
         params = {
-            "symbol": symbol.upper(),
+            "symbol": resolve_binance_symbol(symbol),
             "interval": interval,
             "limit": count
         }
