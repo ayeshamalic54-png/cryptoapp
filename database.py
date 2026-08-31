@@ -461,8 +461,23 @@ def log_signal(symbol_a, symbol_b, price_a, price_b, beta, alpha, z_score, obi, 
             conn.close()
     return None
 
+def send_discord_message(content):
+    """Sends a general plain text message or embed to the Discord Webhook for Crypto App."""
+    import os
+    import requests
+    webhook_url = os.getenv("CRYPTO_DISCORD_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK_URL")
+    if not webhook_url:
+        return False
+    try:
+        payload = {"content": content}
+        res = requests.post(webhook_url, json=payload, timeout=5)
+        return res.status_code == 204
+    except Exception as e:
+        print(f"Error sending Crypto Discord notification: {e}")
+        return False
+
 def log_trade_entry(ticket, symbol, order_type, lots, entry_price, entry_time, comment="", signal_id=None):
-    """Logs the entry of a trade."""
+    """Logs the entry of a trade and sends a Discord webhook notification."""
     query = """
         INSERT INTO trades (ticket, symbol, order_type, lots, entry_price, entry_time, status, comment, signal_id)
         VALUES (%s, %s, %s, %s, %s, %s, 'OPEN', %s, %s)
@@ -479,6 +494,16 @@ def log_trade_entry(ticket, symbol, order_type, lots, entry_price, entry_time, c
         ))
         conn.commit()
         cur.close()
+
+        # Send Crypto Discord entry notification
+        disc_msg = (
+            f"🪙 **CRYPTO FUTURES POSITION OPENED** 🪙\n\n"
+            f"🎫 **Ticket / Order ID:** `{ticket}`\n"
+            f"💱 **Symbol:** `{symbol}` ({comment})\n"
+            f"📦 **Quantity:** `{lots} units` ({order_type})\n"
+            f"💵 **Entry Price:** `${entry_price:.5f}`\n"
+        )
+        send_discord_message(disc_msg)
     except Exception as e:
         print(f"Error logging trade entry: {e}")
     finally:
@@ -508,11 +533,12 @@ def get_open_trades_count(symbol=None):
     return count
 
 def log_trade_exit(ticket, close_price, profit, close_time):
-    """Updates a trade when it is closed."""
+    """Updates a trade when it is closed and sends a Discord webhook notification."""
     query = """
         UPDATE trades
         SET close_price = %s, profit = %s, close_time = %s, status = 'CLOSED'
         WHERE ticket = %s
+        RETURNING symbol, order_type, lots
     """
     conn = None
     try:
@@ -521,8 +547,27 @@ def log_trade_exit(ticket, close_price, profit, close_time):
         cur.execute(query, (
             float(close_price), float(profit), close_time, int(ticket)
         ))
+        row = cur.fetchone()
         conn.commit()
         cur.close()
+
+        symbol_str = row[0] if row else "Crypto"
+        order_type_str = row[1] if row else "TRADE"
+        lots_val = float(row[2]) if row else 0.0
+
+        pnl_val = float(profit)
+        pnl_emoji = "🟢" if pnl_val >= 0 else "🔴"
+        pnl_sign = "+" if pnl_val >= 0 else ""
+
+        disc_msg = (
+            f"🏁 **CRYPTO FUTURES POSITION CLOSED** 🏁\n\n"
+            f"🎫 **Ticket:** `{ticket}`\n"
+            f"💱 **Symbol:** `{symbol_str}` ({order_type_str} {lots_val} units)\n"
+            f"💵 **Close Price:** `${close_price:.5f}`\n"
+            f"💰 **Realized PnL:** `{pnl_sign}${pnl_val:.2f} USDT` {pnl_emoji}\n"
+            f"⏱ **Close Time:** `{close_time}`\n"
+        )
+        send_discord_message(disc_msg)
     except Exception as e:
         print(f"Error logging trade exit: {e}")
     finally:
