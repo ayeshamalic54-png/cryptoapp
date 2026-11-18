@@ -735,10 +735,11 @@ async function runFastCycle() {
 
     const floating = positions.reduce((s, p) => s + Number(p.unrealizedPnl || 0), 0);
     const todayStr = getPktDateStr();
+    const initBal = Number(botRow.initial_balance ?? 0) > 0 ? Number(botRow.initial_balance) : equity || 10000;
     const dmRow = ((
       await db.execute(sql`SELECT start_equity FROM daily_metrics WHERE trading_date=${todayStr} AND COALESCE(mt5_login,0)=0 LIMIT 1`)
     ).rows || [])[0] as any;
-    const startEq = Number(dmRow?.start_equity ?? 0) > 0 ? Number(dmRow.start_equity) : equity || Number(botRow.initial_balance || 10000);
+    const startEq = Number(dmRow?.start_equity ?? 0) > 0 ? Number(dmRow.start_equity) : equity || initBal;
     if (!dmRow && equity > 0) {
       await db.execute(
         sql`INSERT INTO daily_metrics (trading_date, start_equity, current_equity, max_drawdown_percent, trades_today, mt5_login, updated_at)
@@ -747,10 +748,13 @@ async function runFastCycle() {
       );
     }
 
-    const dailyDdPct = startEq > 0 && equity > 0 ? Math.max(0, Number((((startEq - equity) / startEq) * 100).toFixed(2))) : 0;
-    const initBal = Number(botRow.initial_balance ?? 0) > 0 ? Number(botRow.initial_balance) : equity || 10000;
+    // Compute Daily Drawdown & Overall Drawdown strictly relative to configured Capital (initial_balance)
+    const capitalBase = initBal > 0 ? initBal : startEq;
+    const dailyLossUsd = startEq > 0 && equity > 0 ? Math.max(0, startEq - equity) : 0;
+    const dailyDdPct = capitalBase > 0 && equity > 0 ? Number(((dailyLossUsd / capitalBase) * 100).toFixed(2)) : 0;
     const overallDdPct = initBal > 0 && equity > 0 ? Math.max(0, Number((((initBal - equity) / initBal) * 100).toFixed(2))) : 0;
-    peakEquityTracker = Math.max(peakEquityTracker, Number(botRow.max_equity_peak ?? 0), equity);
+    const dbPeakEq = Math.max(Number(botRow.max_equity_peak ?? 0), equity);
+    peakEquityTracker = dbPeakEq;
 
     const resetAt = botRow.metrics_reset_at ? new Date(botRow.metrics_reset_at) : null;
     const tradesTodayRes = resetAt

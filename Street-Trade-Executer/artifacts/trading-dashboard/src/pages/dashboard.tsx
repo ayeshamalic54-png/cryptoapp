@@ -356,6 +356,9 @@ export default function Dashboard() {
                 <span className="text-[10px] font-mono text-zinc-400">Halt {haltDrawdownLimit}% / Max {maxDrawdownLimit}%</span>
               </div>
               <Progress value={Math.min(100, (drawdownPercent / Math.max(1, maxDrawdownLimit)) * 100)} className="h-1.5 bg-zinc-800 [&>div]:bg-amber-500" />
+              <div className="text-[10px] text-zinc-500 font-mono truncate">
+                Capital: ${baseInitial.toFixed(0)} · Max Loss: -${((baseInitial * maxDrawdownLimit) / 100).toFixed(2)}
+              </div>
             </CardContent>
           </Card>
 

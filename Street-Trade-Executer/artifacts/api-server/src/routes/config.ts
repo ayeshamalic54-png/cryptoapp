@@ -168,6 +168,32 @@ router.post("/config", async (req, res) => {
           WHERE id = (SELECT MIN(id) FROM bot_state)`
     );
 
+    if (d.initialBalance !== undefined && Math.abs(initBal - Number(currRow?.initialBalance ?? 0)) > 0.01) {
+      const todayPkt = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Karachi",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date());
+      const liveOrInitEq = Number(currRow?.equity ?? 0) > 0 ? Number(currRow?.equity) : initBal;
+      await db.execute(
+        sql`UPDATE bot_state
+            SET drawdown_percent = 0.00,
+                overall_drawdown = 0.00,
+                max_equity_peak = GREATEST(${initBal.toString()}::numeric, COALESCE(equity, 0))
+            WHERE id = (SELECT MIN(id) FROM bot_state)`
+      );
+      await db.execute(
+        sql`INSERT INTO daily_metrics (trading_date, start_equity, current_equity, max_drawdown_percent, trades_today, mt5_login, updated_at)
+            VALUES (${todayPkt}, ${liveOrInitEq.toString()}, ${liveOrInitEq.toString()}, 0.00, 0, 0, NOW())
+            ON CONFLICT (trading_date, mt5_login) DO UPDATE
+            SET start_equity = EXCLUDED.start_equity,
+                current_equity = EXCLUDED.current_equity,
+                max_drawdown_percent = 0.00,
+                updated_at = NOW()`
+      );
+    }
+
     const updated = (await db.select().from(botStateTable).limit(1))[0];
     void syncLeverageAcrossCoins(leverage, activeSym);
     return res.json(serializeConfig(updated));

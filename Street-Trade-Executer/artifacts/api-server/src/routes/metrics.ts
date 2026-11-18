@@ -118,9 +118,21 @@ router.post("/metrics/reset", async (req, res) => {
           overall_drawdown = 0.00,
           updated_at = NOW()
       WHERE id = (SELECT MIN(id) FROM bot_state)
-      RETURNING metrics_reset_at
+      RETURNING metrics_reset_at, equity, initial_balance
     `);
     const row = ((upd as any).rows || [])[0];
+    const todayPkt = toPktDateStr(new Date());
+    const resetBaseEq = Number(row?.equity ?? 0) > 0 ? Number(row.equity) : Number(row?.initial_balance ?? 10000);
+    await db.execute(sql`
+      INSERT INTO daily_metrics (trading_date, start_equity, current_equity, max_drawdown_percent, trades_today, mt5_login, updated_at)
+      VALUES (${todayPkt}, ${resetBaseEq.toString()}, ${resetBaseEq.toString()}, 0.00, 0, 0, NOW())
+      ON CONFLICT (trading_date, mt5_login) DO UPDATE
+      SET start_equity = EXCLUDED.start_equity,
+          current_equity = EXCLUDED.current_equity,
+          max_drawdown_percent = 0.00,
+          trades_today = 0,
+          updated_at = NOW()
+    `);
     const ts = row?.metrics_reset_at
       ? new Date(String(row.metrics_reset_at) + " UTC").toISOString()
       : new Date().toISOString();
