@@ -725,6 +725,35 @@ function isRejectionConfirmed(closedBar: OhlcBar, isBull: boolean, refPrice: num
   return strongBearBody || bearPinbar;
 }
 
+function computeProtectedSweepAnchor(
+  closedBars: OhlcBar[],
+  closedIdx: number,
+  sweepExtreme: number,
+  isBull: boolean,
+  scale: CryptoScale
+): number {
+  let anchorExt = sweepExtreme;
+  const swNearby = getSwingPoints(closedBars, 3, 3, scale.m5MinAmp);
+  const nearbyDist = scale.refPrice * 0.0025;
+  const levels = isBull ? swNearby.lows : swNearby.highs;
+
+  for (const [lvl, idx] of levels) {
+    if (idx >= closedIdx - 2) continue;
+    const isBeyond = isBull ? lvl < anchorExt && anchorExt - lvl <= nearbyDist : lvl > anchorExt && lvl - anchorExt <= nearbyDist;
+    if (!isBeyond) continue;
+
+    let taken = false;
+    for (let k = idx + 1; k < closedBars.length; k++) {
+      if (isBull ? closedBars[k]!.low <= lvl - scale.minPenetration : closedBars[k]!.high >= lvl + scale.minPenetration) {
+        taken = true;
+        break;
+      }
+    }
+    if (!taken) anchorExt = isBull ? Math.min(anchorExt, lvl) : Math.max(anchorExt, lvl);
+  }
+  return anchorExt;
+}
+
 function evaluateClosedSmcSetup(
   closedBars: OhlcBar[],
   m15Bars: OhlcBar[],
@@ -791,7 +820,8 @@ function evaluateClosedSmcSetup(
               : closedBar.close <= matched.high && entryPrice >= matched.low - scale.maxChaseDist;
           }
           if (s7Ok) {
-            slPrice = rndPrice(isBull ? sw.sweepExtreme - scale.slBuf : sw.sweepExtreme + scale.slBuf, scale.digits);
+            const slAnchor = computeProtectedSweepAnchor(closedBars, closedIdx, sw.sweepExtreme, isBull, scale);
+            slPrice = rndPrice(isBull ? slAnchor - scale.slBuf : slAnchor + scale.slBuf, scale.digits);
             const slDist = isBull ? entryPrice - slPrice : slPrice - entryPrice;
             const slPct = entryPrice > 0 ? (slDist / entryPrice) * 100 : 99;
             const liqSafe = Math.min(maxSlPct, 60 / Math.max(1, leverage));
@@ -876,7 +906,8 @@ export function analyzeLiveSmcTelemetry(
   let { tpPrice, rrr } = ev;
 
   if (tpPrice <= 0 && (isBull || isBear)) {
-    const estSlDist = hasSweep ? Math.abs(livePrice - sw.sweepExtreme) + scale.slBuf : livePrice * 0.005;
+    const estAnchor = hasSweep ? computeProtectedSweepAnchor(closedBars, closedIdx, sw.sweepExtreme, isBull, scale) : 0;
+    const estSlDist = hasSweep ? Math.abs(livePrice - estAnchor) + scale.slBuf : livePrice * 0.005;
     if (estSlDist > 0) {
       const est = computeM15OpposingTarget(isBull, m15Bars, livePrice, estSlDist, minTargetRrr, scale);
       tpPrice = est.tpPrice;
