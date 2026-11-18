@@ -64,7 +64,7 @@ export default function Backtest() {
   const [riskPercent, setRiskPercent] = useState("1.0");
   const [maxMarginPct, setMaxMarginPct] = useState("80");
   const [maxSlPct, setMaxSlPct] = useState("1.2");
-  const [minRrr, setMinRrr] = useState("1.85");
+  const [minRrr, setMinRrr] = useState("1.35");
   const [days, setDays] = useState("14");
   const [sessionFilterEnabled, setSessionFilterEnabled] = useState(false);
   const [breakevenEnabled, setBreakevenEnabled] = useState(true);
@@ -100,7 +100,7 @@ export default function Backtest() {
           riskPercent: parseFloat(riskPercent) || 1.0,
           maxMarginPct: Math.min(accountMode === "PERSONAL" ? 100 : 80, parseFloat(maxMarginPct) || (accountMode === "PERSONAL" ? 100 : 80)),
           maxSlPct: parseFloat(maxSlPct) || 1.2,
-          minRrr: parseFloat(minRrr) || 1.85,
+          minRrr: parseFloat(minRrr) || 1.35,
           days: parseInt(days, 10) || 14,
           sessionFilterEnabled,
           breakevenEnabled,
@@ -141,7 +141,7 @@ export default function Backtest() {
             Strategy &amp; Capital Configuration
           </CardTitle>
           <CardDescription className="text-xs">
-            S1 M15 Bias → S2 M5 Sweep → S3 CHoCH → S4 Displacement FVG → S5 Closed Retest → S6 Rejection → S7 Close → S8 Sweep SL → S9 Opposing M15 Target (≥1.85R)
+            S1 M15 Bias → S2 M5 Sweep → S3 CHoCH → S4 Displacement FVG → S5 Closed Retest → S6 Rejection → S7 Close → S8 Sweep SL → S9 Unbroken M15 Target (1.35R–3.5R)
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">

@@ -72,7 +72,7 @@ router.post("/backtest", async (req, res) => {
     const capMax = accountMode === "PERSONAL" ? 100 : 80;
     const maxMarginPct = Math.min(capMax, Math.max(10, Number(body.maxMarginPct ?? capMax) || capMax));
     const maxSlPct = Math.min(10, Math.max(0.3, Number(body.maxSlPct ?? 1.2) || 1.2));
-    const minRrr = Math.min(4.0, Math.max(1.2, Number(body.minRrr ?? 1.85) || 1.85));
+    const minRrr = Math.min(3.5, Math.max(1.2, Number(body.minRrr ?? 1.35) || 1.35));
     const sessionFilterEnabled = body.sessionFilterEnabled !== undefined ? Boolean(body.sessionFilterEnabled) : false;
     const breakevenEnabled = body.breakevenEnabled !== undefined ? Boolean(body.breakevenEnabled) : true;
 

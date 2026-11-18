@@ -859,7 +859,7 @@ async function runSmcScanCycle() {
       ]);
       if (m5.length < 25 || m15.length < 15) continue;
 
-      const evalRes = analyzeLiveSmcTelemetry(sym, m5, m15, maxSlPct, leverage, 1.85);
+      const evalRes = analyzeLiveSmcTelemetry(sym, m5, m15, maxSlPct, leverage, 1.35);
       const t = evalRes.telemetry as any;
       const openInfo = openTradeMap.get(sym.toUpperCase());
 
@@ -954,7 +954,7 @@ async function runSmcScanCycle() {
       );
 
       if (t.action === "BUY" || t.action === "SELL") {
-        const sc = (evalRes.rrr || 1.85) + (sym === activeSym ? 2.0 : 0);
+        const sc = (evalRes.rrr || 1.35) + (sym === activeSym ? 2.0 : 0);
         if (sc > bestScore) {
           bestScore = sc;
           bestCandidate = { sym, evalRes };

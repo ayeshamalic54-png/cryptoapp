@@ -74,7 +74,7 @@ export function computeCryptoScale(refPrice: number): CryptoScale {
     slBuf: ref * 0.0008,
     maxChaseDist: ref * 0.0035,
     targetMinMove: ref * 0.0012,
-    frontRunBuf: ref * 0.0006,
+    frontRunBuf: ref * 0.00025,
   };
 }
 
@@ -596,55 +596,96 @@ function computeM15OpposingTarget(
   minTargetRrr: number,
   scale: CryptoScale
 ): { tpPrice: number; rrr: number } {
-  const sh3 = getSwingPoints(dfM15, 3, 3, 0);
-  const sw2 = getSwingPoints(dfM15, 2, 2, scale.m15TargetMinAmp);
-  if ((isBuy && !sw2.highs.length) || (!isBuy && !sw2.lows.length)) {
-    const fb = getSwingPoints(dfM15, 2, 2, 0);
-    if (isBuy && !sw2.highs.length) sw2.highs = fb.highs;
-    if (!isBuy && !sw2.lows.length) sw2.lows = fb.lows;
-  }
+  const n = dfM15.length;
+  const unbrokenSwings: number[] = [];
 
-  const m15Zones = detectSmcZones(dfM15, scale, 0);
-
-  if (isBuy) {
-    const cands = [
-      ...sh3.highs.map(([p]) => p),
-      ...sw2.highs.map(([p]) => p),
-      ...m15Zones.bearOb.map((z) => z.low),
-      ...m15Zones.bearBreaker.map((z) => z.low),
-    ]
-      .filter((p) => p > entryPrice + scale.targetMinMove)
-      .sort((a, b) => a - b);
-
-    for (const lvl of cands) {
-      const frontRunTp = lvl - scale.frontRunBuf;
-      const candRrr = (frontRunTp - entryPrice) / slDist;
-      if (candRrr >= minTargetRrr) {
-        if (candRrr > 3.0) return { tpPrice: rndPrice(entryPrice + 3.0 * slDist, scale.digits), rrr: 3.0 };
-        return { tpPrice: rndPrice(frontRunTp, scale.digits), rrr: Number(candRrr.toFixed(2)) };
+  // Target ONLY unbroken M15 structural liquidity (Swing Highs/Lows not yet swept since formation)
+  // so TP sits on an actual reachable M15 liquidity pool instead of dead levels or empty-space multiples.
+  const collectUnbroken = (nLeft: number, nRight: number, minAmp: number) => {
+    for (let i = nLeft; i < n - nRight; i++) {
+      if (isBuy) {
+        const hi = dfM15[i]!.high;
+        let ok = true;
+        for (let j = 1; j <= nLeft; j++) if (hi < dfM15[i - j]!.high) ok = false;
+        for (let j = 1; j <= nRight; j++) if (hi <= dfM15[i + j]!.high) ok = false;
+        if (!ok) continue;
+        if (minAmp > 0) {
+          let baseLow = Infinity;
+          for (let k = i - nLeft; k <= i + nRight; k++) baseLow = Math.min(baseLow, dfM15[k]!.low);
+          if (hi - baseLow < minAmp) continue;
+        }
+        if (hi <= entryPrice + scale.targetMinMove) continue;
+        let broken = false;
+        for (let k = i + 1; k < n; k++) {
+          if (dfM15[k]!.high >= hi) {
+            broken = true;
+            break;
+          }
+        }
+        if (!broken) unbrokenSwings.push(hi);
+      } else {
+        const lo = dfM15[i]!.low;
+        let ok = true;
+        for (let j = 1; j <= nLeft; j++) if (lo > dfM15[i - j]!.low) ok = false;
+        for (let j = 1; j <= nRight; j++) if (lo >= dfM15[i + j]!.low) ok = false;
+        if (!ok) continue;
+        if (minAmp > 0) {
+          let baseHigh = -Infinity;
+          for (let k = i - nLeft; k <= i + nRight; k++) baseHigh = Math.max(baseHigh, dfM15[k]!.high);
+          if (baseHigh - lo < minAmp) continue;
+        }
+        if (lo >= entryPrice - scale.targetMinMove) continue;
+        let broken = false;
+        for (let k = i + 1; k < n; k++) {
+          if (dfM15[k]!.low <= lo) {
+            broken = true;
+            break;
+          }
+        }
+        if (!broken) unbrokenSwings.push(lo);
       }
     }
-    return { tpPrice: rndPrice(entryPrice + 2.2 * slDist, scale.digits), rrr: 2.2 };
+  };
+
+  collectUnbroken(3, 3, scale.m15TargetMinAmp);
+  if (!unbrokenSwings.length) collectUnbroken(3, 3, 0);
+  if (!unbrokenSwings.length) collectUnbroken(2, 2, scale.m15MinAmp);
+
+  unbrokenSwings.sort((a, b) => (isBuy ? a - b : b - a));
+  if (!unbrokenSwings.length || slDist <= 0) return { tpPrice: 0, rrr: 0 };
+
+  // Evaluate the NEAREST unbroken M15 Draw-on-Liquidity first — never jump past a close wall
+  // to invent an unachievable distant target or blind 3.0R/2.2R math price.
+  const nearestLvl = unbrokenSwings[0]!;
+  const frontRunTp = rndPrice(isBuy ? nearestLvl - scale.frontRunBuf : nearestLvl + scale.frontRunBuf, scale.digits);
+  const nearestRrr = (isBuy ? frontRunTp - entryPrice : entryPrice - frontRunTp) / slDist;
+
+  if (nearestRrr < minTargetRrr) {
+    return { tpPrice: frontRunTp, rrr: Number(Math.max(0, nearestRrr).toFixed(2)) };
+  }
+  if (nearestRrr <= 3.5) {
+    return { tpPrice: frontRunTp, rrr: Number(nearestRrr.toFixed(2)) };
   }
 
-  const cands = [
-    ...sh3.lows.map(([p]) => p),
-    ...sw2.lows.map(([p]) => p),
-    ...m15Zones.bullOb.map((z) => z.high),
-    ...m15Zones.bullBreaker.map((z) => z.high),
-  ]
-    .filter((p) => p < entryPrice - scale.targetMinMove)
-    .sort((a, b) => b - a);
-
-  for (const lvl of cands) {
-    const frontRunTp = lvl + scale.frontRunBuf;
-    const candRrr = (entryPrice - frontRunTp) / slDist;
-    if (candRrr >= minTargetRrr) {
-      if (candRrr > 3.0) return { tpPrice: rndPrice(entryPrice - 3.0 * slDist, scale.digits), rrr: 3.0 };
-      return { tpPrice: rndPrice(frontRunTp, scale.digits), rrr: Number(candRrr.toFixed(2)) };
+  // Only if the nearest unbroken swing is > 3.5R away, check a nearer unmitigated M15 OB/Breaker inside [minTargetRrr..3.5R]
+  const m15Zones = detectSmcZones(dfM15, scale, 0);
+  const oppZones = isBuy
+    ? [...m15Zones.bearOb.map((z) => z.low), ...m15Zones.bearBreaker.map((z) => z.low)].filter(
+        (p) => p > entryPrice + scale.targetMinMove
+      )
+    : [...m15Zones.bullOb.map((z) => z.high), ...m15Zones.bullBreaker.map((z) => z.high)].filter(
+        (p) => p < entryPrice - scale.targetMinMove
+      );
+  oppZones.sort((a, b) => (isBuy ? a - b : b - a));
+  for (const zl of oppZones) {
+    const zTp = rndPrice(isBuy ? zl - scale.frontRunBuf : zl + scale.frontRunBuf, scale.digits);
+    const zRrr = (isBuy ? zTp - entryPrice : entryPrice - zTp) / slDist;
+    if (zRrr >= minTargetRrr && zRrr <= 3.5) {
+      return { tpPrice: zTp, rrr: Number(zRrr.toFixed(2)) };
     }
   }
-  return { tpPrice: rndPrice(entryPrice - 2.2 * slDist, scale.digits), rrr: 2.2 };
+
+  return { tpPrice: frontRunTp, rrr: Number(nearestRrr.toFixed(2)) };
 }
 
 interface SmcClosedEvaluation {
@@ -763,7 +804,8 @@ function evaluateClosedSmcSetup(
               const tpDist = Math.abs(tpPrice - entryPrice);
               const feeEst = entryPrice * 0.0007; // 0.05% taker entry + 0.02% maker TP
               const netRrr = (tpDist - feeEst) / (slDist + feeEst);
-              if (rrr >= minTargetRrr && netRrr >= 1.75) {
+              const minNetRrr = Math.max(1.15, minTargetRrr - 0.15);
+              if (tpPrice > 0 && rrr >= minTargetRrr && rrr <= 3.5 && netRrr >= minNetRrr) {
                 s9Ok = true;
                 action = isBull ? "BUY" : "SELL";
               }
@@ -807,7 +849,7 @@ export function analyzeLiveSmcTelemetry(
   m15Bars: OhlcBar[],
   maxSlPct = 1.2,
   leverage = 5,
-  minTargetRrr = 1.85
+  minTargetRrr = 1.35
 ) {
   const symUpper = resolveBinanceSymbol(symbol);
   if (!m5Bars.length || !m15Bars.length) {

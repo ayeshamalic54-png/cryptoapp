@@ -978,7 +978,7 @@ export function SmcChartOverlay({
                 : !s8Pass
                 ? "Step 1-7 PASS 🟢 — Step 8 PENDING 🔴: Structural SL cap / Liquidation safety guard"
                 : !s9Pass
-                ? "Step 1-8 PASS 🟢 — Step 9 BLOCKED 🔴: M15 Opposing Target < 1.85R"
+                ? "Step 1-8 PASS 🟢 — Step 9 BLOCKED 🔴: Nearest Unbroken M15 Target < 1.35R / > 3.5R"
                 : "Steps 1-9 VERIFIED 🟢 — All Pure SMC Conditions Aligned!"}
             </p>
           </div>
@@ -1384,7 +1384,7 @@ export function SmcChartOverlay({
             { label: "S6: Rejection Candle", pass: s6Pass, badge: s6Pass ? s6Status : "PENDING ⚪", desc: s6Pass ? "Confirmed rejection candle / pin off FVG." : "Waiting for closed rejection close or hammer/star." },
             { label: "S7: Close & Anti-Chase", pass: s7Pass, badge: s7Pass ? s7Status : "PENDING ⚪", desc: s7Pass ? "Closed confirmation without chasing past FVG." : "Entry waits strictly for candle close & chase guard." },
             { label: "S8: SL Guard (0.08% Buf)", pass: s8Pass, badge: s8Status || (s8Pass ? "PASS 🟢" : "PENDING ⚪"), desc: s8Pass ? `SL anchored $${fmtP(slPrice)} behind sweep (Liq-Safe).` : "Locks 0.08% beyond sweep wick + max SL/liq cap." },
-            { label: "S9: M15 Opposing Target", pass: s9Pass, badge: s9Status || (s9Pass ? `PASS 🟢 (${effectiveRrr}R)` : "PENDING ⚪"), desc: s9Pass ? `M15 liquidity TP at $${fmtP(tpPrice)} (${effectiveRrr}R).` : "Requires >= 1.85R clear room to M15 liquidity." },
+            { label: "S9: M15 Opposing Target", pass: s9Pass, badge: s9Status || (s9Pass ? `PASS 🟢 (${effectiveRrr}R)` : "PENDING ⚪"), desc: s9Pass ? `Unbroken M15 liquidity TP at $${fmtP(tpPrice)} (${effectiveRrr}R).` : "Requires unobstructed M15 Swing Target (1.35R–3.5R)." },
           ].map((c) => (
             <div key={c.label} className={cn("p-3 rounded-lg border transition-all", c.pass ? "bg-emerald-950/30 border-emerald-500/50 text-white" : "bg-[#0d121f] border-zinc-800 text-zinc-400")}>
               <div className="flex items-center justify-between mb-1 gap-1">

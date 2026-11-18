@@ -113,7 +113,7 @@ export async function sendDiscordCryptoSignalAlert(input: CryptoSignalAlertInput
           value: `\`$${tpS} USDT\`\n*(+${tpPct.toFixed(2)}% | M15 Liquidity Target)*`,
           inline: true,
         },
-        { name: "📐 Risk : Reward", value: `\`1 : ${input.rrr.toFixed(2)} R\` *(Min ≥ 1.85R)*`, inline: true },
+        { name: "📐 Risk : Reward", value: `\`1 : ${input.rrr.toFixed(2)} R\` *(Unbroken M15 DOL)*`, inline: true },
         {
           name: "📦 Position & Risk",
           value: `\`${input.qty}\` units | Risk: \`$${input.riskUsdt.toFixed(2)} USDT\``,
