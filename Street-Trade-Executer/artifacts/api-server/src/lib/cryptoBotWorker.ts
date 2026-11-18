@@ -15,6 +15,7 @@ import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import {
   analyzeLiveSmcTelemetry,
+  computeFeeAdjustedRiskDist,
   formatCryptoPrice,
   resolveBinanceSymbol,
 } from "./smcEngine";
@@ -269,7 +270,8 @@ function calculateFuturesQty(
   }
 
   const riskBudget = equity * (effRiskPct / 100);
-  const rawQtyRisk = riskBudget / slDist;
+  const effSlDist = computeFeeAdjustedRiskDist(entryPrice, slDist);
+  const rawQtyRisk = riskBudget / effSlDist;
   const maxNotional = equity * (capMarginPct / 100) * effLev;
   const maxQtyMargin = maxNotional / entryPrice;
   let qty = quantizeStep(Math.min(rawQtyRisk, maxQtyMargin), filter.stepSize, false);
@@ -279,7 +281,7 @@ function calculateFuturesQty(
     const reqNotional = Math.max(filter.minNotional * 1.02, filter.minQty * entryPrice);
     const bumpQty = quantizeStep(reqNotional / entryPrice, filter.stepSize, true);
     const bumpNotional = bumpQty * entryPrice;
-    const bumpRiskPct = ((bumpQty * slDist) / equity) * 100;
+    const bumpRiskPct = ((bumpQty * effSlDist) / equity) * 100;
     const maxSafeBumpRisk = !isPersonal ? 1.9 : 15.0;
     if (bumpNotional <= maxNotional && bumpRiskPct <= maxSafeBumpRisk) {
       qty = bumpQty;
@@ -301,7 +303,7 @@ function calculateFuturesQty(
     qty,
     marginUsed: Number(marginUsed.toFixed(2)),
     marginPct: Number(marginPct.toFixed(2)),
-    riskUsdt: Number((qty * slDist).toFixed(2)),
+    riskUsdt: Number((qty * effSlDist).toFixed(2)),
   };
 }
 

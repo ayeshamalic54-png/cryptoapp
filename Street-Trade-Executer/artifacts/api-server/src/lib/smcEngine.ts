@@ -1041,6 +1041,12 @@ export interface CryptoTradeSim {
   exitTime: string;
 }
 
+export function computeFeeAdjustedRiskDist(entryPrice: number, slDist: number): number {
+  if (entryPrice <= 0 || slDist <= 0) return Math.max(0, slDist);
+  // Reserve 0.08%–0.10% round-trip Binance taker fees + ~0.03% STOP_MARKET slippage so total SL loss stays ~1.0x Risk%
+  return slDist + entryPrice * 0.0012;
+}
+
 function sizeSimCryptoPosition(
   entryPrice: number,
   slPrice: number,
@@ -1056,7 +1062,8 @@ function sizeSimCryptoPosition(
     accountMode === "PERSONAL" ? Math.min(98.5, Math.max(5, maxMarginPct)) : Math.min(80, Math.max(5, maxMarginPct));
   const effRiskPct = accountMode === "PROP_FIRM" ? Math.min(riskPercent, 1.75) : riskPercent;
   const riskUsd = balance * (effRiskPct / 100);
-  const rawQtyRisk = riskUsd / slDist;
+  const effSlRisk = computeFeeAdjustedRiskDist(entryPrice, slDist);
+  const rawQtyRisk = riskUsd / effSlRisk;
   const maxNotional = balance * (capMarginPct / 100) * Math.max(1, leverage);
   const maxQtyMargin = maxNotional / entryPrice;
   const qty = Math.min(rawQtyRisk, maxQtyMargin);
