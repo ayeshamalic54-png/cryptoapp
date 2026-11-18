@@ -1,14 +1,12 @@
+import "./lib/env";
 import http from "http";
 import app from "./app";
 import { initWsServer } from "./lib/ws";
 import { initDb } from "./lib/initDb";
+import { startCryptoBotWorker } from "./lib/cryptoBotWorker";
 import { logger } from "./lib/logger";
 
-const rawPort = process.env["PORT"];
-
-if (!rawPort) {
-  throw new Error("PORT environment variable is required but was not provided.");
-}
+const rawPort = process.env["PORT"] || "8090";
 
 const port = Number(rawPort);
 
@@ -27,6 +25,7 @@ initDb()
         process.exit(1);
       }
       logger.info({ port }, "Server listening");
+      startCryptoBotWorker();
     });
   })
   .catch((err) => {

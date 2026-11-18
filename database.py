@@ -531,8 +531,8 @@ def _fmt_price_str(val):
     return f"{float(val):.8f}"
 
 
-def send_discord_message(content):
-    """Sends a notification strictly to the dedicated Crypto Discord Webhook (separate from Forex channel)."""
+def send_discord_message(content, embeds=None):
+    """Sends a notification (plus optional rich embed card) to the dedicated Crypto Discord Webhook."""
     import os
     import requests
     webhook_url = (os.getenv("CRYPTO_DISCORD_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
@@ -540,6 +540,8 @@ def send_discord_message(content):
         return False
     try:
         payload = {"content": content}
+        if embeds:
+            payload["embeds"] = embeds
         res = requests.post(webhook_url, json=payload, timeout=5)
         return res.status_code in (200, 204)
     except Exception as e:

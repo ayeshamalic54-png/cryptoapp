@@ -56,32 +56,61 @@ def send_discord_crypto_smc_signal(
     max_margin_pct: float,
     ticket_id: int = 0,
     is_signal_only: bool = False,
+    is_test_preview: bool = False,
 ):
-    """Formats Crypto USDT-M Futures SMC alerts identically to the Forex terminal Discord signals."""
+    """Sends a crisp, institutional Pure 9-Step Crypto Futures Discord card (push summary + structured Embed)."""
     act_u = str(action).upper()
     is_long = act_u == "BUY"
-    act_str = "MARKET LONG (BUY) 🟢" if is_long else "MARKET SHORT (SELL) 🔴"
+    side_emoji = "🟢" if is_long else "🔴"
+    act_str = "MARKET LONG (BUY)" if is_long else "MARKET SHORT (SELL)"
     sl_pct = (abs(entry_p - sl_p) / entry_p * 100.0) if entry_p > 0 else 0.0
+    tp_pct = (abs(tp_p - entry_p) / entry_p * 100.0) if entry_p > 0 else 0.0
     now_str = db.format_pkt_time_str()
-    mode_header = (
-        "📢 **[ NEW PURE SMC CRYPTO SIGNAL ]** 📢\n*(Signals Only Mode — Auto-Execution OFF)*"
-        if is_signal_only
-        else f"🚀 **[ NEW CRYPTO FUTURES POSITION OPENED ]** 🚀 *(Ticket `#{ticket_id}`)*"
-    )
-    msg = (
+    entry_s = db._fmt_price_str(entry_p)
+    sl_s = db._fmt_price_str(sl_p)
+    tp_s = db._fmt_price_str(tp_p)
+
+    if is_test_preview:
+        title = f"🧪 [SAMPLE PREVIEW] CRYPTO FUTURES SMC SIGNAL · {symbol}"
+        push_prefix = "📢 **[SAMPLE CRYPTO SIGNAL PREVIEW]**"
+    elif is_signal_only:
+        title = f"📢 NEW PURE SMC CRYPTO SIGNAL · {symbol} ({leverage}x)"
+        push_prefix = "📢 **[NEW CRYPTO SMC SIGNAL — SIGNALS ONLY]**"
+    else:
+        title = f"🚀 CRYPTO FUTURES POSITION OPENED · {symbol} (#{ticket_id})"
+        push_prefix = "🚀 **[NEW CRYPTO FUTURES TRADE EXECUTED]**"
+
+    push_content = (
         f"@everyone\n"
-        f"📢 **PURE SMC / ICT 9-CONDITION CRYPTO FUTURES ENGINE** 📢\n"
-        f"{mode_header}\n\n"
-        f"{'🟢' if is_long else '🔴'} **ACTION:** `{act_str}` (**{symbol}** · {leverage}x)\n"
-        f"⏱ **TIME:** `{now_str}`\n"
-        f"📊 **STRATEGY:** `Pure SMC Structure (9-Step Verified) 🟢`\n"
-        f"💼 **ACCOUNT MODE:** `{account_mode}`\n\n"
-        f"📥 **ENTRY PRICE:** `${db._fmt_price_str(entry_p)}`\n"
-        f"⛔ **STOP LOSS (SL):** `${db._fmt_price_str(sl_p)}` *({sl_pct:.2f}% | Sweep {'-' if is_long else '+'} 0.08% Buffer)*\n"
-        f"🎯 **TAKE PROFIT (TP):** `${db._fmt_price_str(tp_p)}` *({rrr:.2f}R Opposing M15 Liquidity Target)*\n"
-        f"📦 **POSITION SIZE:** `{qty} units` | Risk: `${size_info.get('risk_usdt', 0)} USDT` | Margin: `{size_info.get('margin_pct', 0)}%` *(Cap ≤ {max_margin_pct:.0f}%)*\n"
+        f"{push_prefix} {side_emoji} **{act_str}** | `{symbol}` ({leverage}x)\n"
+        f"📥 **Entry:** `${entry_s}` | ⛔ **SL:** `${sl_s}` (`-{sl_pct:.2f}%`) | 🎯 **TP:** `${tp_s}` (`+{tp_pct:.2f}%` · `{rrr:.2f}R`)"
     )
-    db.send_discord_message(msg)
+
+    embeds = [
+        {
+            "title": title,
+            "description": (
+                f"**Strategy:** `Pure 9-Condition Institutional SMC (M15 Bias + M5 Sweep + CHoCH + FVG + Closed Retest & Rejection) 🟢`\n"
+                f"**Time (PKT):** `{now_str}`"
+            ),
+            "color": 0x10B981 if is_long else 0xEF4444,
+            "fields": [
+                {"name": "💱 Coin / Perpetual", "value": f"`{symbol}` ({leverage}x Leverage)", "inline": True},
+                {"name": f"{side_emoji} Side / Action", "value": f"`{act_str}`", "inline": True},
+                {"name": "💼 Account Mode", "value": f"`{account_mode}`", "inline": True},
+                {"name": "📥 Entry Price", "value": f"`${entry_s} USDT`", "inline": True},
+                {"name": "⛔ Stop Loss (SL)", "value": f"`${sl_s} USDT`\n*(-{sl_pct:.2f}% | Sweep {'-' if is_long else '+'} 0.08% Buf)*", "inline": True},
+                {"name": "🎯 Take Profit (TP)", "value": f"`${tp_s} USDT`\n*(+{tp_pct:.2f}% | M15 Liquidity Target)*", "inline": True},
+                {"name": "📐 Risk : Reward", "value": f"`1 : {rrr:.2f} R` *(Min ≥ 1.85R)*", "inline": True},
+                {"name": "📦 Size & Risk", "value": f"`{qty}` units | Risk: `${size_info.get('risk_usdt', 0)} USDT`", "inline": True},
+                {"name": "🛡️ Capital Margin", "value": f"`{size_info.get('margin_pct', 0)}%` *(Cap ≤ {max_margin_pct:.0f}%)*", "inline": True},
+            ],
+            "footer": {
+                "text": "Crypto Futures Quant Terminal · Pure 9-Step SMC Engine · Binance USDT-M"
+            },
+        }
+    ]
+    return db.send_discord_message(push_content, embeds=embeds)
 
 
 def _pkt_hour_decimal() -> float:

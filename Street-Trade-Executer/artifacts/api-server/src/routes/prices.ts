@@ -3,7 +3,7 @@ import { TOP_10_CRYPTO_COINS } from "./binance";
 
 const router = Router();
 
-interface PriceRow {
+export interface PriceRow {
   symbol: string;
   price: number;
   change24h: number | null;
@@ -12,6 +12,41 @@ interface PriceRow {
   category: string;
   source: string;
   updatedAt: string;
+}
+
+let livePriceMapCache: { ts: number; map: Record<string, number> } = { ts: 0, map: {} };
+
+export async function fetchLivePriceMap(): Promise<Record<string, number>> {
+  if (Date.now() - livePriceMapCache.ts < 2000 && Object.keys(livePriceMapCache.map).length > 0) {
+    return livePriceMapCache.map;
+  }
+  const isTestnet = ["true", "1", "yes"].includes((process.env.USE_BINANCE_TESTNET || "").trim().toLowerCase());
+  const endpoints = isTestnet
+    ? ["https://testnet.binancefuture.com/fapi/v1/ticker/price", "https://fapi.binance.com/fapi/v1/ticker/price"]
+    : ["https://fapi.binance.com/fapi/v1/ticker/price", "https://testnet.binancefuture.com/fapi/v1/ticker/price"];
+
+  for (const url of endpoints) {
+    try {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(3500) });
+      if (!resp.ok) continue;
+      const arr = (await resp.json()) as Array<{ symbol: string; price: string }>;
+      if (!Array.isArray(arr) || arr.length === 0) continue;
+      const nextMap: Record<string, number> = {};
+      for (const item of arr) {
+        const p = parseFloat(item.price);
+        if (item.symbol && p > 0) {
+          nextMap[item.symbol.toUpperCase()] = p;
+        }
+      }
+      if (Object.keys(nextMap).length > 0) {
+        livePriceMapCache = { ts: Date.now(), map: nextMap };
+        return nextMap;
+      }
+    } catch {
+      // try next endpoint
+    }
+  }
+  return livePriceMapCache.map;
 }
 
 async function fetchBinanceFuturesPrices(): Promise<PriceRow[]> {

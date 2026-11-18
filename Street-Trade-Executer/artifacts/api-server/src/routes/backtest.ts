@@ -16,12 +16,17 @@ async function fetchPaginatedBinanceKlines(
   const maxPages = interval === "5m" ? 8 : 3;
 
   for (let p = 0; p < maxPages && cursor < endTimeMs; p++) {
-    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(
+    const query = `symbol=${encodeURIComponent(
       sym
     )}&interval=${interval}&startTime=${cursor}&endTime=${endTimeMs}&limit=1500`;
-    const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!resp.ok) {
-      throw new Error(`Binance klines HTTP ${resp.status} for ${sym}`);
+    let resp: Response | null = null;
+    for (const base of ["https://fapi.binance.com", "https://testnet.binancefuture.com"]) {
+      const cand = await fetch(`${base}/fapi/v1/klines?${query}`, { signal: AbortSignal.timeout(8000) });
+      resp = cand;
+      if (cand.ok) break;
+    }
+    if (!resp || !resp.ok) {
+      throw new Error(`Binance klines HTTP ${resp?.status ?? 0} for ${sym}`);
     }
     const raw = (await resp.json()) as any[];
     if (!Array.isArray(raw) || raw.length === 0) break;

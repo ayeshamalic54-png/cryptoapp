@@ -22,7 +22,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { getApiUrl } from "@/lib/api";
-import { ShieldAlert, Zap, ZapOff, Shield, Lock } from "lucide-react";
+import { ShieldAlert, Zap, ZapOff, Shield, Lock, Bell, Send } from "lucide-react";
 
 const configSchema = z.object({
   activePair: z.string().min(2, "Coin symbol is required"),
@@ -60,6 +60,7 @@ export default function Config() {
   const [currentPass, setCurrentPass] = useState("");
   const [newPass, setNewPass] = useState("");
   const [confirmPass, setConfirmPass] = useState("");
+  const [discordTesting, setDiscordTesting] = useState(false);
 
   const { data: config, isLoading } = useGetConfig({ query: { queryKey: getGetConfigQueryKey() } });
   const updateConfig = useUpdateConfig();
@@ -178,6 +179,35 @@ export default function Config() {
       }
     } catch {
       toast({ title: "Connection Error", variant: "destructive" });
+    }
+  };
+
+  const handleSendDiscordTest = async () => {
+    if (isReadOnly || discordTesting) return;
+    setDiscordTesting(true);
+    try {
+      const res = await fetch(getApiUrl("/api/discord/test"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: activePair || "BTCUSDT" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.ok) {
+        toast({
+          title: "Test Crypto Signal Sent 🟢",
+          description: `Delivered rich Entry/SL/TP SMC preview for ${data.symbol} to your Crypto Discord channel.`,
+        });
+      } else {
+        toast({
+          title: "Discord Test Failed",
+          description: data?.detail || data?.error || `HTTP ${res.status}`,
+          variant: "destructive",
+        });
+      }
+    } catch {
+      toast({ title: "Connection Error", description: "Could not reach API server.", variant: "destructive" });
+    } finally {
+      setDiscordTesting(false);
     }
   };
 
@@ -509,6 +539,43 @@ export default function Config() {
               </div>
             ))}
           </div>
+        </CardContent>
+      </Card>
+
+      {/* DISCORD CRYPTO SIGNAL ALERTS */}
+      <Card className="bg-card border-border">
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2">
+              <Bell className="w-4 h-4 text-indigo-400" />
+              <CardTitle className="text-sm uppercase tracking-wider text-muted-foreground">
+                Crypto Discord Signal Channel (Direct Cloud Bot)
+              </CardTitle>
+            </div>
+            <Badge variant="outline" className="text-[10px] font-mono bg-indigo-500/10 text-indigo-300 border-indigo-500/30">
+              CRYPTO_DISCORD_WEBHOOK_URL
+            </Badge>
+          </div>
+          <CardDescription className="text-xs">
+            Sends instant @everyone mobile push notifications + Entry / SL / TP / RRR / Leverage / PKT Time cards directly from Render (isolated from your Forex Discord channel).
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="rounded border border-border bg-zinc-950/70 p-3 font-mono text-[11px] text-zinc-300 space-y-1">
+            <div className="text-indigo-400 font-bold">Sample Signal Pattern Preview:</div>
+            <div>@everyone 🟢 [BTCUSDT] MARKET LONG (BUY) · 5x ISOLATED USDT-M</div>
+            <div>📌 Entry: Market Price | 🛑 SL (-0.80%) | 🎯 TP (+2.40% · 1:3.0 RRR)</div>
+            <div>⚙️ Pure 9-Step SMC + M15 Structure + One-Time Fee-Safe Breakeven + Close PnL Card (PKT)</div>
+          </div>
+          <Button
+            type="button"
+            onClick={handleSendDiscordTest}
+            disabled={isReadOnly || discordTesting}
+            className="bg-indigo-600 hover:bg-indigo-500 text-white font-mono text-xs font-bold flex items-center gap-2"
+          >
+            <Send className="w-3.5 h-3.5" />
+            {discordTesting ? "SENDING TEST SIGNAL..." : "SEND TEST DISCORD SIGNAL PREVIEW"}
+          </Button>
         </CardContent>
       </Card>
 

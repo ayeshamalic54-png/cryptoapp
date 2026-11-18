@@ -10,6 +10,7 @@ import {
 import { desc, eq } from "drizzle-orm";
 import { analyzeLiveSmcTelemetry, formatCryptoPrice, resolveBinanceSymbol } from "../lib/smcEngine";
 import { fetchBinanceKlines, resolveLiveBinanceSymbol } from "./binance";
+import { fetchLivePriceMap } from "./prices";
 
 const router = Router();
 
@@ -46,16 +47,25 @@ function formatTelemetryRow(row: any) {
 
 router.get("/dashboard", async (req, res) => {
   try {
-    const [botStateRows, openDbTrades, recentClosedTradesRows, zoneRows, scannedAssetsRows, closedTradesSumRows, telemetryRows] =
-      await Promise.all([
-        db.select().from(botStateTable).where(eq(botStateTable.id, 1)).limit(1),
-        db.select().from(tradesTable).where(eq(tradesTable.status, "OPEN")),
-        db.select().from(tradesTable).where(eq(tradesTable.status, "CLOSED")).orderBy(desc(tradesTable.entryTime)).limit(20),
-        db.select().from(fvgZonesTable).orderBy(desc(fvgZonesTable.updatedAt)).limit(60),
-        db.select().from(scannedAssetsTable).orderBy(desc(scannedAssetsTable.winRate)),
-        db.select({ profit: tradesTable.profit }).from(tradesTable).where(eq(tradesTable.status, "CLOSED")),
-        db.select().from(smcTelemetryTable),
-      ]);
+    const [
+      botStateRows,
+      openDbTrades,
+      recentClosedTradesRows,
+      zoneRows,
+      scannedAssetsRows,
+      closedTradesSumRows,
+      telemetryRows,
+      livePriceMap,
+    ] = await Promise.all([
+      db.select().from(botStateTable).where(eq(botStateTable.id, 1)).limit(1),
+      db.select().from(tradesTable).where(eq(tradesTable.status, "OPEN")),
+      db.select().from(tradesTable).where(eq(tradesTable.status, "CLOSED")).orderBy(desc(tradesTable.entryTime)).limit(20),
+      db.select().from(fvgZonesTable).orderBy(desc(fvgZonesTable.updatedAt)).limit(250),
+      db.select().from(scannedAssetsTable).orderBy(desc(scannedAssetsTable.winRate)),
+      db.select({ profit: tradesTable.profit }).from(tradesTable).where(eq(tradesTable.status, "CLOSED")),
+      db.select().from(smcTelemetryTable),
+      fetchLivePriceMap(),
+    ]);
 
     const botState = botStateRows[0];
     const activeSym = resolveBinanceSymbol(botState?.activePair ?? "BTCUSDT");
@@ -66,18 +76,22 @@ router.get("/dashboard", async (req, res) => {
       botState?.lastHeartbeat != null &&
       Date.now() - new Date(botState.lastHeartbeat).getTime() < 30_000;
 
-    const openPositions = openDbTrades.map((t) => ({
-      ticket: Number(t.ticket),
-      symbol: t.symbol,
-      type: t.orderType,
-      lots: Number(t.lots),
-      entry: Number(t.entryPrice),
-      current: Number(t.closePrice ?? t.entryPrice),
-      sl: t.sl != null ? Number(t.sl) : 0,
-      tp: t.tp != null ? Number(t.tp) : 0,
-      profit: Number(t.profit ?? 0),
-      comment: t.comment ?? "",
-    }));
+    const openPositions = openDbTrades.map((t) => {
+      const symU = String(t.symbol || "").toUpperCase();
+      const liveMark = livePriceMap[symU];
+      return {
+        ticket: Number(t.ticket),
+        symbol: t.symbol,
+        type: t.orderType,
+        lots: Number(t.lots),
+        entry: Number(t.entryPrice),
+        current: liveMark && liveMark > 0 ? liveMark : Number(t.closePrice ?? t.entryPrice),
+        sl: t.sl != null ? Number(t.sl) : 0,
+        tp: t.tp != null ? Number(t.tp) : 0,
+        profit: Number(t.profit ?? 0),
+        comment: t.comment ?? "",
+      };
+    });
 
     const recentClosedTrades = recentClosedTradesRows
       .filter((t) => !resetAtMs || (t.closeTime ? t.closeTime.getTime() >= resetAtMs : t.entryTime.getTime() >= resetAtMs))
@@ -151,14 +165,19 @@ router.get("/dashboard", async (req, res) => {
       activeZones,
       scannedAssets: scannedAssetsRows
         .filter((s) => !String(s.symbolPair).includes("/"))
-        .map((s) => ({
-          symbolPair: s.symbolPair,
-          priceA: Number(s.priceA ?? 0),
-          priceB: Number(s.priceB ?? 0),
-          winRate: Number(s.winRate ?? 0),
-          zScore: Number(s.zScore ?? 0),
-          action: s.action ?? "NEUTRAL",
-        })),
+        .map((s) => {
+          const symU = String(s.symbolPair).toUpperCase();
+          const liveMark = livePriceMap[symU];
+          return {
+            symbolPair: s.symbolPair,
+            priceA: liveMark && liveMark > 0 ? liveMark : Number(s.priceA ?? 0),
+            priceB: Number(s.priceB ?? 0),
+            winRate: Number(s.winRate ?? 0),
+            zScore: Number(s.zScore ?? 0),
+            action: s.action ?? "NEUTRAL",
+          };
+        }),
+      livePrices: livePriceMap,
       smcTelemetry: activeTelemetry,
       smcTelemetryAll: telemetryMap,
       botOnline: isOnline,
@@ -177,15 +196,37 @@ router.get("/dashboard", async (req, res) => {
 router.get("/smc_telemetry", async (req, res) => {
   try {
     const requestedSym = req.query.symbol ? resolveBinanceSymbol(String(req.query.symbol)) : null;
-    const rows = await db.select().from(smcTelemetryTable);
+    const [rows, livePriceMap] = await Promise.all([
+      db.select().from(smcTelemetryTable),
+      fetchLivePriceMap(),
+    ]);
     if (requestedSym) {
-      const dbMatch = rows.find((r) => String(r.symbol).toUpperCase() === requestedSym);
+      const resolvedSym = await resolveLiveBinanceSymbol(requestedSym);
+      const dbMatch = rows.find((r) => String(r.symbol).toUpperCase() === requestedSym || String(r.symbol).toUpperCase() === resolvedSym);
       const ageMs = dbMatch?.updatedAt ? Date.now() - new Date(dbMatch.updatedAt).getTime() : Infinity;
+      const liveTicker = livePriceMap[resolvedSym] ?? livePriceMap[requestedSym] ?? 0;
       if (dbMatch && ageMs < 45_000) {
-        return res.json({ telemetry: formatTelemetryRow(dbMatch), activeZones: null, source: "db" });
+        const dbZones = await db
+          .select()
+          .from(fvgZonesTable)
+          .where(eq(fvgZonesTable.symbol, dbMatch.symbol));
+        const mappedZones = dbZones.map((z) => {
+          const meta = ZONE_META[z.zoneType] ?? { label: z.zoneType.toUpperCase(), bullish: true };
+          const dir = meta.bullish ? "BULLISH" : "BEARISH";
+          return {
+            type: `${dir}_${meta.label}`,
+            label: `${meta.bullish ? "🟢" : "🔴"} ${meta.label} - ${z.symbol}`,
+            range: `${formatCryptoPrice(Number(z.lowPrice))}-${formatCryptoPrice(Number(z.highPrice))}`,
+          };
+        });
+        return res.json({
+          telemetry: formatTelemetryRow(dbMatch),
+          activeZones: mappedZones,
+          livePrice: liveTicker || undefined,
+          source: "db",
+        });
       }
       // On-demand live Binance SMC computation for ANY searched Binance coin!
-      const resolvedSym = await resolveLiveBinanceSymbol(requestedSym);
       const [m5, m15] = await Promise.all([
         fetchBinanceKlines(resolvedSym, "5m", 100),
         fetchBinanceKlines(resolvedSym, "15m", 80),
@@ -201,7 +242,7 @@ router.get("/smc_telemetry", async (req, res) => {
       return res.json({
         telemetry: live.telemetry,
         activeZones: live.activeZones,
-        livePrice: live.livePrice,
+        livePrice: liveTicker || live.livePrice,
         source: "binance_live",
       });
     }

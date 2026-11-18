@@ -645,8 +645,13 @@ export function analyzeLiveSmcTelemetry(
   if (!m5Bars.length || !m15Bars.length) {
     return {
       telemetry: { symbol: symUpper, m15_bias: "NEUTRAL ⚪", action: "NONE" },
-      activeZones: [],
+      activeZones: [] as Array<{ type: string; label: string; range: string }>,
+      rawZones: [] as Array<{ zoneType: string; low: number; high: number }>,
       livePrice: 0,
+      slPrice: 0,
+      tpPrice: 0,
+      rrr: 0,
+      stepProgress: 0,
     };
   }
 
@@ -780,8 +785,29 @@ export function analyzeLiveSmcTelemetry(
   pushZones(allZones.bullBreaker, "BULLISH_BREAKER", "BREAKER", true);
   pushZones(allZones.bearBreaker, "BEARISH_BREAKER", "BREAKER", false);
 
+  const stepProgress = [isBull || isBear, hasSweep, chochOk, fvgOk, retestOk, s6Ok, s7Ok, s8Ok, s9Ok].filter(Boolean).length;
+  const rawZones: Array<{ zoneType: string; low: number; high: number }> = [];
+  const pushRaw = (items: ZoneBox[], zoneType: string) => {
+    for (const item of items) {
+      if (item.high > item.low) rawZones.push({ zoneType, low: item.low, high: item.high });
+    }
+  };
+  pushRaw(allZones.bullFvg, "bullish_fvg");
+  pushRaw(allZones.bearFvg, "bearish_fvg");
+  pushRaw(allZones.bullIfvg, "bullish_ifvg");
+  pushRaw(allZones.bearIfvg, "bearish_ifvg");
+  pushRaw(allZones.bullOb, "bullish_ob");
+  pushRaw(allZones.bearOb, "bearish_ob");
+  pushRaw(allZones.bullBreaker, "bullish_breaker");
+  pushRaw(allZones.bearBreaker, "bearish_breaker");
+
   return {
     livePrice,
+    slPrice,
+    tpPrice,
+    rrr,
+    stepProgress,
+    rawZones,
     activeZones,
     telemetry: {
       symbol: symUpper,
@@ -802,6 +828,7 @@ export function analyzeLiveSmcTelemetry(
         bearish_fvg: bearFvgArr,
         opposing_tp: tpPrice,
         sl_price: slPrice,
+        step_progress: stepProgress,
         candles,
       }),
     },

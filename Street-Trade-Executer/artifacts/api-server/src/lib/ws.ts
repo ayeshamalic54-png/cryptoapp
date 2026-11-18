@@ -11,6 +11,7 @@ import {
 import { desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
 import { formatCryptoPrice, resolveBinanceSymbol } from "./smcEngine";
+import { fetchLivePriceMap } from "../routes/prices";
 
 let wss: WebSocketServer | null = null;
 
@@ -79,7 +80,7 @@ async function buildDashboardPayload() {
   }
 
   if (!cachedZoneRows || now - lastZonesFetch > 5000) {
-    cachedZoneRows = await db.select().from(fvgZonesTable).orderBy(desc(fvgZonesTable.updatedAt)).limit(60);
+    cachedZoneRows = await db.select().from(fvgZonesTable).orderBy(desc(fvgZonesTable.updatedAt)).limit(250);
     lastZonesFetch = now;
   }
 
@@ -88,9 +89,10 @@ async function buildDashboardPayload() {
     lastTelemetryFetch = now;
   }
 
-  const [botStateRows, scannedAssetsRows] = await Promise.all([
+  const [botStateRows, scannedAssetsRows, livePriceMap] = await Promise.all([
     db.select().from(botStateTable).where(eq(botStateTable.id, 1)).limit(1),
     db.select().from(scannedAssetsTable).orderBy(desc(scannedAssetsTable.winRate)),
+    fetchLivePriceMap(),
   ]);
 
   const botState = botStateRows[0];
@@ -102,18 +104,22 @@ async function buildDashboardPayload() {
 
   const openPositions = cachedRecentTrades
     .filter((t: any) => t.status === "OPEN")
-    .map((t: any) => ({
-      ticket: Number(t.ticket),
-      symbol: t.symbol,
-      type: t.orderType,
-      lots: Number(t.lots),
-      entry: Number(t.entryPrice),
-      current: Number(t.closePrice ?? t.entryPrice),
-      sl: t.sl != null ? Number(t.sl) : 0,
-      tp: t.tp != null ? Number(t.tp) : 0,
-      profit: Number(t.profit ?? 0),
-      comment: t.comment ?? "",
-    }));
+    .map((t: any) => {
+      const symU = String(t.symbol || "").toUpperCase();
+      const liveMark = livePriceMap[symU];
+      return {
+        ticket: Number(t.ticket),
+        symbol: t.symbol,
+        type: t.orderType,
+        lots: Number(t.lots),
+        entry: Number(t.entryPrice),
+        current: liveMark && liveMark > 0 ? liveMark : Number(t.closePrice ?? t.entryPrice),
+        sl: t.sl != null ? Number(t.sl) : 0,
+        tp: t.tp != null ? Number(t.tp) : 0,
+        profit: Number(t.profit ?? 0),
+        comment: t.comment ?? "",
+      };
+    });
 
   const activeZones = cachedZoneRows.map((z: any) => {
     const meta = ZONE_META[z.zoneType] ?? { label: z.zoneType.toUpperCase(), bullish: true };
@@ -182,14 +188,19 @@ async function buildDashboardPayload() {
     activeZones,
     scannedAssets: scannedAssetsRows
       .filter((s: any) => !String(s.symbolPair).includes("/"))
-      .map((s: any) => ({
-        symbolPair: s.symbolPair,
-        priceA: Number(s.priceA ?? 0),
-        priceB: Number(s.priceB ?? 0),
-        winRate: Number(s.winRate ?? 0),
-        zScore: Number(s.zScore ?? 0),
-        action: s.action ?? "NEUTRAL",
-      })),
+      .map((s: any) => {
+        const symU = String(s.symbolPair).toUpperCase();
+        const liveMark = livePriceMap[symU];
+        return {
+          symbolPair: s.symbolPair,
+          priceA: liveMark && liveMark > 0 ? liveMark : Number(s.priceA ?? 0),
+          priceB: Number(s.priceB ?? 0),
+          winRate: Number(s.winRate ?? 0),
+          zScore: Number(s.zScore ?? 0),
+          action: s.action ?? "NEUTRAL",
+        };
+      }),
+    livePrices: livePriceMap,
     smcTelemetry: activeTelemetry,
     smcTelemetryAll: telemetryMap,
     botOnline: isOnline,

@@ -4,6 +4,8 @@ import { botStateTable } from "@workspace/db";
 import { UpdateConfigBody } from "@workspace/api-zod";
 import { sql } from "drizzle-orm";
 import { resolveBinanceSymbol } from "../lib/smcEngine";
+import { getCryptoDiscordWebhookUrl, sendDiscordCryptoSignalAlert } from "../lib/discord";
+import { fetchBinanceKlines } from "./binance";
 
 const router = Router();
 
@@ -234,6 +236,86 @@ router.post("/bot/control", async (req, res) => {
   } catch (err) {
     req.log.error({ err }, "Failed to update bot control state");
     return res.status(500).json({ error: "Failed to update bot state" });
+  }
+});
+
+router.get("/discord/status", (_req, res) => {
+  const configured = Boolean(getCryptoDiscordWebhookUrl());
+  return res.json({ configured });
+});
+
+router.post("/discord/test", async (req, res) => {
+  try {
+    const webhookUrl = getCryptoDiscordWebhookUrl();
+    if (!webhookUrl || !webhookUrl.startsWith("http")) {
+      return res.status(400).json({
+        ok: false,
+        configured: false,
+        status: 0,
+        detail: "CRYPTO_DISCORD_WEBHOOK_URL is not set on this server. Add your new Crypto Discord channel webhook in Render Environment Variables.",
+      });
+    }
+
+    const state = (await db.select().from(botStateTable).limit(1))[0] as any;
+    const sym = resolveBinanceSymbol(String(req.body?.symbol || state?.activePair || "BTCUSDT"));
+    const leverage = Math.max(1, Number(state?.leverage ?? 5) || 5);
+    const riskPct = Math.max(0.1, Number(state?.riskPercent ?? 1.0) || 1.0);
+    const maxMarginPct = Math.min(80, Math.max(10, Number(state?.maxMarginPct ?? 80) || 80));
+    const accMode = String(state?.accountMode ?? "PROP_FIRM").toUpperCase();
+    const equity = Math.max(50, Number(state?.equity ?? state?.initialBalance ?? 10000) || 10000);
+
+    const klines = await fetchBinanceKlines(sym, "5m", 5);
+    const liveClose = klines.length > 0 ? Number(klines[klines.length - 1].close) : 0;
+    const entryPrice = liveClose > 0 ? liveClose : sym.startsWith("BTC") ? 91500 : sym.startsWith("ETH") ? 3120 : 185.5;
+    const slPrice = entryPrice * 0.992;
+    const tpPrice = entryPrice * 1.024;
+    const rrr = 3.0;
+    const riskUsdt = (equity * riskPct) / 100;
+    const stopDist = Math.abs(entryPrice - slPrice);
+    const qty = stopDist > 0 ? riskUsdt / stopDist : 0;
+    const notional = qty * entryPrice;
+    const marginUsed = notional / leverage;
+    const marginPct = Math.min(maxMarginPct, equity > 0 ? (marginUsed / equity) * 100 : 0);
+
+    const result = await sendDiscordCryptoSignalAlert({
+      action: "BUY",
+      symbol: sym,
+      entryPrice,
+      slPrice,
+      tpPrice,
+      rrr,
+      qty,
+      leverage,
+      accountMode: accMode,
+      riskUsdt,
+      marginPct,
+      maxMarginPct,
+      isSignalOnly: true,
+      isTestPreview: true,
+    });
+
+    if (!result.ok) {
+      return res.status(502).json({
+        ok: false,
+        configured: true,
+        status: result.status,
+        detail: result.detail || `Discord returned HTTP ${result.status}`,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      configured: true,
+      status: result.status,
+      symbol: sym,
+      entryPrice,
+      slPrice,
+      tpPrice,
+      rrr,
+    });
+  } catch (err: any) {
+    req.log.error({ err }, "Failed to send Discord test preview");
+    return res.status(500).json({ ok: false, error: err?.message || "Discord test error" });
   }
 });
 

@@ -88,7 +88,7 @@ export default function Dashboard() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
     },
-    refetchInterval: dbTelemetryForCoin ? 12000 : 4500,
+    refetchInterval: 4000,
     enabled: Boolean(selectedChartSymbol),
   });
 
@@ -137,15 +137,16 @@ export default function Dashboard() {
 
   const effectiveTelemetry = dbTelemetryForCoin ?? onDemandSmc?.telemetry ?? dashboard.smcTelemetry ?? null;
   const scannedMatch = scannedAssets.find((a: any) => String(a.symbolPair).toUpperCase() === selectedChartSymbol.toUpperCase());
-  const currentLivePrice = Number(scannedMatch?.priceA || onDemandSmc?.livePrice || 0);
+  const liveTickerPrice = Number(dashboard?.livePrices?.[selectedChartSymbol.toUpperCase()] ?? 0);
+  const currentLivePrice = Number(liveTickerPrice || onDemandSmc?.livePrice || scannedMatch?.priceA || 0);
 
   const matchingPosition = activePositions.find(
     (p: any) => String(p.symbol).toUpperCase() === selectedChartSymbol.toUpperCase()
   );
 
-  // Merge DB zones for active coin + on-demand Binance zones (FVG, iFVG, OB, BREAKER)
+  // Merge live Binance zones first (matching visible M5 candles) with DB zones fallback
   const dbSymbolZones = activeZones.filter((z: any) => String(z.label).toUpperCase().includes(selectedChartSymbol.toUpperCase()));
-  const chartZones = dbSymbolZones.length > 0 ? dbSymbolZones : onDemandSmc?.activeZones ?? [];
+  const chartZones = onDemandSmc?.activeZones?.length ? onDemandSmc.activeZones : dbSymbolZones;
 
   const handleToggleBot = async () => {
     if (isReadOnly || togglingBot) return;
@@ -401,8 +402,10 @@ export default function Dashboard() {
         {/* BINANCE COIN SELECTOR (TOP 10 + SEARCH ANY BINANCE COIN) */}
         <Card className="bg-zinc-900/70 border-zinc-800 p-3.5 sm:p-4 space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-mono text-zinc-300">
-              <span>Active Priority Bot Coin: <strong className="text-emerald-400">{currentPair}</strong></span>
+            <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-zinc-300">
+              <span>Chart Inspection: <strong className="text-sky-400">{selectedChartSymbol}</strong> <span className="text-zinc-500">(View only — clicking coins never places trades)</span></span>
+              <span className="text-zinc-600">|</span>
+              <span>Pinned Bot Priority: <strong className="text-emerald-400">{currentPair}</strong></span>
               {selectedChartSymbol !== currentPair && !isReadOnly && (
                 <Button size="sm" variant="outline" onClick={handlePinCustomSymbol} className="h-6 px-2 text-[10px] font-mono border-indigo-500/40 text-indigo-300 hover:bg-indigo-500/10">
                   <Star className="w-3 h-3 mr-1" /> Pin {selectedChartSymbol} to Scanner
@@ -590,7 +593,7 @@ export default function Dashboard() {
           <CardContent>
             {scannedAssets.length === 0 ? (
               <div className="text-sm text-muted-foreground py-6 text-center border border-dashed border-border rounded font-mono">
-                Waiting for Binance Futures Python engine heartbeat...
+                Waiting for Direct Cloud Crypto SMC Engine scan...
               </div>
             ) : (
               <div className="overflow-x-auto">
