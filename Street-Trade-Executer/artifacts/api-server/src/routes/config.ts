@@ -3,39 +3,65 @@ import { db } from "@workspace/db";
 import { botStateTable } from "@workspace/db";
 import { UpdateConfigBody } from "@workspace/api-zod";
 import { sql } from "drizzle-orm";
+import { resolveBinanceSymbol } from "../lib/smcEngine";
 
 const router = Router();
+
+function parseSessionHour(raw: unknown, fallback: number): number {
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  const wrapped = ((n % 24) + 24) % 24;
+  return Math.round(wrapped * 2) / 2;
+}
+
+function serializeConfig(state: any) {
+  const activeSym = resolveBinanceSymbol(state?.activePair ?? "BTCUSDT");
+  const accMode = String(state?.accountMode ?? "PROP_FIRM").toUpperCase();
+  return {
+    activePair: activeSym,
+    symbolA: activeSym,
+    symbolB: "USDT",
+    zEntryThreshold: 0,
+    maxDailyTrades: Number(state?.maxTrades ?? 10),
+    maxDailyLossPercent: Number(state?.maxDrawdownLimit ?? 4.0),
+    requireSmcConfluence: true,
+    slPips: Number(state?.maxSlPct ?? state?.slPips ?? 1.2),
+    tpPips: Number(state?.tpPips ?? 2.4),
+    smcEnabled: true,
+    autoExecute: state?.autoExecute ?? true,
+    cryptoEnabled: true,
+    metalsEnabled: false,
+    forexEnabled: false,
+    indicesEnabled: false,
+    riskLimitsEnabled: state?.riskLimitsEnabled ?? true,
+    defaultLots: Number(state?.defaultLots ?? 0.01),
+    initialBalance: Number(state?.initialBalance ?? 10000),
+    knifeProtectionEnabled: false,
+    obiEnabled: false,
+    volatilityFilterEnabled: false,
+    accountMode: accMode,
+    leverage: Number(state?.leverage ?? 5),
+    riskPercent: Number(state?.riskPercent ?? (accMode === "PROP_FIRM" ? 1.0 : 2.5)),
+    maxMarginPct: Math.min(80, Number(state?.maxMarginPct ?? 80.0)),
+    maxSlPct: Number(state?.maxSlPct ?? 1.2),
+    haltDrawdownLimit: Number(state?.haltDrawdownLimit ?? 3.5),
+    maxDrawdownLimit: Number(state?.maxDrawdownLimit ?? 4.0),
+    guardianShieldPct: Number(state?.guardianShieldPct ?? 1.8),
+    sessionGuardEnabled: Boolean(state?.sessionGuardEnabled ?? false),
+    sessionStartHour: Number(state?.sessionStartHour ?? 12.0),
+    sessionEndHour: Number(state?.sessionEndHour ?? 16.0),
+    session2Enabled: Boolean(state?.session2Enabled ?? true),
+    session2StartHour: Number(state?.session2StartHour ?? 18.0),
+    session2EndHour: Number(state?.session2EndHour ?? 22.0),
+    isBotRunning: Boolean(state?.isBotRunning ?? true),
+  };
+}
 
 router.get("/config", async (req, res) => {
   try {
     const rows = await db.select().from(botStateTable).limit(1);
-    const state = rows[0];
-    const pair = state?.activePair ?? "BTCUSDT/ETHUSDT";
-    const parts = pair.split("/");
-
-    return res.json({
-      activePair: pair,
-      symbolA: parts[0] ?? "BTCUSDT",
-      symbolB: parts[1] ?? "ETHUSDT",
-      zEntryThreshold: Number(state?.zEntryThreshold ?? 2.0),
-      maxDailyTrades: Number(state?.maxTrades ?? 3),
-      maxDailyLossPercent: 2.8,
-      requireSmcConfluence: state?.smcEnabled ?? true,
-      slPips: Number(state?.slPips ?? 10),
-      tpPips: Number(state?.tpPips ?? 20),
-      smcEnabled: state?.smcEnabled ?? true,
-      autoExecute: state?.autoExecute ?? true,
-      cryptoEnabled: state?.cryptoEnabled ?? true,
-      metalsEnabled: state?.metalsEnabled ?? true,
-      forexEnabled: state?.forexEnabled ?? true,
-      indicesEnabled: state?.indicesEnabled ?? true,
-      riskLimitsEnabled: state?.riskLimitsEnabled ?? true,
-      defaultLots: Number(state?.defaultLots ?? 0.01),
-      initialBalance: Number(state?.initialBalance ?? 100000.00),
-      knifeProtectionEnabled: state?.knifeProtectionEnabled ?? true,
-      obiEnabled: state?.obiEnabled ?? true,
-      volatilityFilterEnabled: state?.volatilityFilterEnabled ?? true,
-    });
+    return res.json(serializeConfig(rows[0]));
   } catch (err) {
     req.log.error({ err }, "Failed to get config");
     return res.status(500).json({ error: "Failed to get config" });
@@ -46,86 +72,168 @@ router.post("/config", async (req, res) => {
   try {
     const parsed = UpdateConfigBody.safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json({ error: "Invalid request body" });
-      return;
+      return res.status(400).json({ error: "Invalid request body", details: parsed.error.flatten() });
     }
 
-    const { activePair, slPips, tpPips, zEntryThreshold, smcEnabled, autoExecute, cryptoEnabled, metalsEnabled, forexEnabled, indicesEnabled, riskLimitsEnabled, defaultLots, maxDailyTrades, knifeProtectionEnabled, obiEnabled, volatilityFilterEnabled } = parsed.data;
-    const parts = activePair.split("/");
-    if (parts.length !== 2 || !parts[0] || !parts[1]) {
-      return res.status(400).json({ error: "activePair must be SYMBOL_A/SYMBOL_B" });
-      return;
-    }
+    const d = parsed.data;
+    const activeSym = resolveBinanceSymbol(d.activePair);
+    const currRow = (await db.select().from(botStateTable).limit(1))[0];
 
-    const autoExec = autoExecute ?? true;
-    const cryptoExec = cryptoEnabled ?? true;
-    const metalsExec = metalsEnabled ?? true;
-    const forexExec = forexEnabled ?? true;
-    const indicesExec = indicesEnabled ?? true;
-    const riskLimits = riskLimitsEnabled ?? true;
-    const zEntry = zEntryThreshold ?? 2.0;
-    const defLots = defaultLots ?? 0.01;
-    const knifeExec = knifeProtectionEnabled ?? true;
-    const obiExec = obiEnabled ?? true;
-    const volExec = volatilityFilterEnabled ?? true;
+    const accMode = (d.accountMode ?? (currRow?.accountMode as "PROP_FIRM" | "PERSONAL") ?? "PROP_FIRM").toUpperCase();
+    const leverage = Math.max(1, Math.min(50, Math.round(Number(d.leverage ?? currRow?.leverage ?? 5))));
+    const riskPercent = Math.max(0.1, Math.min(20, Number(d.riskPercent ?? currRow?.riskPercent ?? (accMode === "PROP_FIRM" ? 1.0 : 2.5))));
+    // Strict <= 80% max margin cap enforced server-side
+    const maxMarginPct = Math.max(5, Math.min(80, Number(d.maxMarginPct ?? currRow?.maxMarginPct ?? 80)));
+    const maxSlPct = Math.max(0.2, Math.min(10, Number(d.maxSlPct ?? d.slPips ?? currRow?.maxSlPct ?? 1.2)));
+    const haltDD = Math.max(0.5, Math.min(15, Number(d.haltDrawdownLimit ?? currRow?.haltDrawdownLimit ?? 3.5)));
+    const maxDD = Math.max(1.0, Math.min(20, Number(d.maxDrawdownLimit ?? currRow?.maxDrawdownLimit ?? 4.0)));
+    const shieldPct = Math.max(0.5, Math.min(10, Number(d.guardianShieldPct ?? currRow?.guardianShieldPct ?? 1.8)));
+
+    const autoExec = d.autoExecute ?? currRow?.autoExecute ?? true;
+    const riskLimits = d.riskLimitsEnabled ?? currRow?.riskLimitsEnabled ?? true;
+    const defLots = d.defaultLots ?? Number(currRow?.defaultLots ?? 0.01);
+    const maxDailyTrades = d.maxDailyTrades ?? Number(currRow?.maxTrades ?? 10);
+    const initBal = d.initialBalance !== undefined ? d.initialBalance : Number(currRow?.initialBalance ?? 10000);
+
+    const sgEnabled = d.sessionGuardEnabled ?? Boolean(currRow?.sessionGuardEnabled ?? false);
+    const sgStart = parseSessionHour(d.sessionStartHour, Number(currRow?.sessionStartHour ?? 12.0));
+    const sgEnd = parseSessionHour(d.sessionEndHour, Number(currRow?.sessionEndHour ?? 16.0));
+    const sg2Enabled = d.session2Enabled ?? Boolean(currRow?.session2Enabled ?? true);
+    const sg2Start = parseSessionHour(d.session2StartHour, Number(currRow?.session2StartHour ?? 18.0));
+    const sg2End = parseSessionHour(d.session2EndHour, Number(currRow?.session2EndHour ?? 22.0));
 
     await db.execute(
-      sql`INSERT INTO bot_state (id, active_pair, sl_pips, tp_pips, z_entry_threshold, smc_enabled, auto_execute, crypto_enabled, metals_enabled, forex_enabled, indices_enabled, risk_limits_enabled, default_lots, max_trades, system_status, updated_at, knife_protection_enabled, obi_enabled, volatility_filter_enabled)
-          SELECT 1, ${activePair}, ${(slPips ?? 10).toString()}, ${(tpPips ?? 20).toString()}, ${zEntry.toString()}, ${smcEnabled ?? true}, ${autoExec}, ${cryptoExec}, ${metalsExec}, ${forexExec}, ${indicesExec}, ${riskLimits}, ${defLots.toString()}, ${maxDailyTrades ?? 3}, 'BOT OFFLINE', NOW(), ${knifeExec}, ${obiExec}, ${volExec}
+      sql`INSERT INTO bot_state (
+            id, active_pair, sl_pips, tp_pips, z_entry_threshold, smc_enabled, auto_execute,
+            crypto_enabled, metals_enabled, forex_enabled, indices_enabled, risk_limits_enabled,
+            default_lots, max_trades, system_status, initial_balance,
+            knife_protection_enabled, obi_enabled, volatility_filter_enabled,
+            account_mode, leverage, risk_percent, max_margin_pct, max_sl_pct,
+            halt_drawdown_limit, max_drawdown_limit, guardian_shield_pct,
+            session_guard_enabled, session_start_hour, session_end_hour,
+            session2_enabled, session2_start_hour, session2_end_hour, updated_at
+          )
+          SELECT 1, ${activeSym}, ${maxSlPct.toString()}, ${(d.tpPips ?? 2.4).toString()}, '0.00', TRUE, ${autoExec},
+                 TRUE, FALSE, FALSE, FALSE, ${riskLimits}, ${defLots.toString()}, ${maxDailyTrades},
+                 'BOT OFFLINE', ${initBal.toString()}, FALSE, FALSE, FALSE,
+                 ${accMode}, ${leverage}, ${riskPercent.toString()}, ${maxMarginPct.toString()}, ${maxSlPct.toString()},
+                 ${haltDD.toString()}, ${maxDD.toString()}, ${shieldPct.toString()},
+                 ${sgEnabled}, ${sgStart.toString()}, ${sgEnd.toString()},
+                 ${sg2Enabled}, ${sg2Start.toString()}, ${sg2End.toString()}, NOW()
           WHERE NOT EXISTS (SELECT 1 FROM bot_state)`
     );
 
     await db.execute(
       sql`UPDATE bot_state
-          SET active_pair  = ${activePair},
-              sl_pips      = ${(slPips ?? 10).toString()},
-              tp_pips      = ${(tpPips ?? 20).toString()},
-              z_entry_threshold = ${zEntry.toString()},
-              smc_enabled  = ${smcEnabled ?? true},
+          SET active_pair = ${activeSym},
+              sl_pips = ${maxSlPct.toString()},
+              tp_pips = ${(d.tpPips ?? 2.4).toString()},
+              z_entry_threshold = '0.00',
+              smc_enabled = TRUE,
               auto_execute = ${autoExec},
-              crypto_enabled = ${cryptoExec},
-              metals_enabled = ${metalsExec},
-              forex_enabled = ${forexExec},
-              indices_enabled = ${indicesExec},
+              crypto_enabled = TRUE,
+              metals_enabled = FALSE,
+              forex_enabled = FALSE,
+              indices_enabled = FALSE,
               risk_limits_enabled = ${riskLimits},
               default_lots = ${defLots.toString()},
-              max_trades   = ${maxDailyTrades ?? 3},
-              knife_protection_enabled = ${knifeExec},
-              obi_enabled = ${obiExec},
-              volatility_filter_enabled = ${volExec},
-              updated_at   = NOW()
+              max_trades = ${maxDailyTrades},
+              initial_balance = ${initBal.toString()},
+              knife_protection_enabled = FALSE,
+              obi_enabled = FALSE,
+              volatility_filter_enabled = FALSE,
+              account_mode = ${accMode},
+              leverage = ${leverage},
+              risk_percent = ${riskPercent.toString()},
+              max_margin_pct = ${maxMarginPct.toString()},
+              max_sl_pct = ${maxSlPct.toString()},
+              halt_drawdown_limit = ${haltDD.toString()},
+              max_drawdown_limit = ${maxDD.toString()},
+              guardian_shield_pct = ${shieldPct.toString()},
+              session_guard_enabled = ${sgEnabled},
+              session_start_hour = ${sgStart.toString()},
+              session_end_hour = ${sgEnd.toString()},
+              session2_enabled = ${sg2Enabled},
+              session2_start_hour = ${sg2Start.toString()},
+              session2_end_hour = ${sg2End.toString()},
+              updated_at = NOW()
           WHERE id = (SELECT MIN(id) FROM bot_state)`
     );
 
     const updated = (await db.select().from(botStateTable).limit(1))[0];
-    const updatedPair = updated?.activePair ?? activePair;
-    const updatedParts = updatedPair.split("/");
-
-    return res.json({
-      activePair: updatedPair,
-      symbolA: updatedParts[0] ?? parts[0],
-      symbolB: updatedParts[1] ?? parts[1],
-      zEntryThreshold: Number(updated?.zEntryThreshold ?? zEntry),
-      maxDailyTrades: Number(updated?.maxTrades ?? maxDailyTrades ?? 3),
-      maxDailyLossPercent: 2.8,
-      requireSmcConfluence: updated?.smcEnabled ?? true,
-      slPips: Number(updated?.slPips ?? slPips ?? 10),
-      tpPips: Number(updated?.tpPips ?? tpPips ?? 20),
-      smcEnabled: updated?.smcEnabled ?? true,
-      autoExecute: updated?.autoExecute ?? autoExec,
-      cryptoEnabled: updated?.cryptoEnabled ?? cryptoExec,
-      metalsEnabled: updated?.metalsEnabled ?? metalsExec,
-      forexEnabled: updated?.forexEnabled ?? forexExec,
-      indicesEnabled: updated?.indicesEnabled ?? indicesExec,
-      riskLimitsEnabled: updated?.riskLimitsEnabled ?? riskLimits,
-      defaultLots: Number(updated?.defaultLots ?? defLots),
-      knifeProtectionEnabled: updated?.knifeProtectionEnabled ?? knifeExec,
-      obiEnabled: updated?.obiEnabled ?? obiExec,
-      volatilityFilterEnabled: updated?.volatilityFilterEnabled ?? volExec,
-    });
+    return res.json(serializeConfig(updated));
   } catch (err) {
     req.log.error({ err }, "Failed to update config");
     return res.status(500).json({ error: "Failed to update config" });
+  }
+});
+
+router.post("/toggle-session-guard", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const curr = (await db.select().from(botStateTable).limit(1))[0];
+    const enabled = body.enabled !== undefined ? Boolean(body.enabled) : !Boolean(curr?.sessionGuardEnabled);
+    const startH = parseSessionHour(body.start_hour ?? body.sessionStartHour, Number(curr?.sessionStartHour ?? 12.0));
+    const endH = parseSessionHour(body.end_hour ?? body.sessionEndHour, Number(curr?.sessionEndHour ?? 16.0));
+    const s2Enabled =
+      body.session2_enabled !== undefined
+        ? Boolean(body.session2_enabled)
+        : body.session2Enabled !== undefined
+        ? Boolean(body.session2Enabled)
+        : Boolean(curr?.session2Enabled ?? true);
+    const s2Start = parseSessionHour(
+      body.session2_start_hour ?? body.session2StartHour,
+      Number(curr?.session2StartHour ?? 18.0)
+    );
+    const s2End = parseSessionHour(
+      body.session2_end_hour ?? body.session2EndHour,
+      Number(curr?.session2EndHour ?? 22.0)
+    );
+
+    await db.execute(
+      sql`UPDATE bot_state
+          SET session_guard_enabled = ${enabled},
+              session_start_hour = ${startH.toString()},
+              session_end_hour = ${endH.toString()},
+              session2_enabled = ${s2Enabled},
+              session2_start_hour = ${s2Start.toString()},
+              session2_end_hour = ${s2End.toString()},
+              updated_at = NOW()
+          WHERE id = (SELECT MIN(id) FROM bot_state)`
+    );
+
+    const updated = (await db.select().from(botStateTable).limit(1))[0];
+    return res.json({
+      status: "ok",
+      sessionGuardEnabled: Boolean(updated?.sessionGuardEnabled ?? enabled),
+      sessionStartHour: Number(updated?.sessionStartHour ?? startH),
+      sessionEndHour: Number(updated?.sessionEndHour ?? endH),
+      session2Enabled: Boolean(updated?.session2Enabled ?? s2Enabled),
+      session2StartHour: Number(updated?.session2StartHour ?? s2Start),
+      session2EndHour: Number(updated?.session2EndHour ?? s2End),
+    });
+  } catch (err) {
+    req.log.error({ err }, "Failed to toggle session guard");
+    return res.status(500).json({ error: "Failed to toggle session guard" });
+  }
+});
+
+router.post("/bot/control", async (req, res) => {
+  try {
+    const action = String(req.body?.action ?? "").toUpperCase();
+    const running = action === "START" ? true : action === "PAUSE" || action === "STOP" ? false : Boolean(req.body?.isBotRunning);
+    const nextStatus = running ? "RUNNING (Active SMC)" : "PAUSED (User Control)";
+    await db.execute(
+      sql`UPDATE bot_state
+          SET is_bot_running = ${running},
+              system_status = ${nextStatus},
+              updated_at = NOW()
+          WHERE id = (SELECT MIN(id) FROM bot_state)`
+    );
+    return res.json({ status: "ok", isBotRunning: running, systemStatus: nextStatus });
+  } catch (err) {
+    req.log.error({ err }, "Failed to update bot control state");
+    return res.status(500).json({ error: "Failed to update bot state" });
   }
 });
 

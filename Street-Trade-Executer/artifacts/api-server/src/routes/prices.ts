@@ -1,118 +1,80 @@
 import { Router } from "express";
-import { db } from "@workspace/db";
-import { scannedAssetsTable } from "@workspace/db";
+import { TOP_10_CRYPTO_COINS } from "./binance";
 
 const router = Router();
 
-async function fetchBinanceFuturesPrices(): Promise<Array<{
+interface PriceRow {
   symbol: string;
   price: number;
   change24h: number | null;
   changePct24h: number | null;
+  quoteVolume: number;
   category: string;
   source: string;
   updatedAt: string;
-}>> {
-  const result: Array<{
-    symbol: string;
-    price: number;
-    change24h: number | null;
-    changePct24h: number | null;
-    category: string;
-    source: string;
-    updatedAt: string;
-  }> = [];
-  try {
-    const resp = await fetch(
-      "https://fapi.binance.com/fapi/v1/ticker/24hr",
-      { signal: AbortSignal.timeout(6000) }
-    );
-    if (!resp.ok) return result;
-    const data = (await resp.json()) as Array<{
-      symbol: string;
-      lastPrice: string;
-      priceChange: string;
-      priceChangePercent: string;
-    }>;
-    const nowStr = new Date().toISOString();
-    for (const item of data) {
-      if (item.symbol.endsWith("USDT")) {
-        result.push({
+}
+
+async function fetchBinanceFuturesPrices(): Promise<PriceRow[]> {
+  const isTestnet = ["true", "1", "yes"].includes((process.env.USE_BINANCE_TESTNET || "").trim().toLowerCase());
+  const endpoints = isTestnet
+    ? ["https://testnet.binancefuture.com/fapi/v1/ticker/24hr", "https://fapi.binance.com/fapi/v1/ticker/24hr"]
+    : ["https://fapi.binance.com/fapi/v1/ticker/24hr"];
+
+  for (const url of endpoints) {
+    try {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(6000) });
+      if (!resp.ok) continue;
+      const data = (await resp.json()) as Array<{
+        symbol: string;
+        lastPrice: string;
+        priceChange: string;
+        priceChangePercent: string;
+        quoteVolume?: string;
+      }>;
+      const nowStr = new Date().toISOString();
+      const topRank = new Map(TOP_10_CRYPTO_COINS.map((sym, idx) => [sym, idx]));
+      const list: PriceRow[] = [];
+      for (const item of data) {
+        if (!item.symbol.endsWith("USDT")) continue;
+        const price = parseFloat(item.lastPrice) || 0;
+        if (price <= 0) continue;
+        list.push({
           symbol: item.symbol,
-          price: parseFloat(item.lastPrice) || 0,
-          change24h: parseFloat(item.priceChange) || null,
-          changePct24h: parseFloat(item.priceChangePercent) || null,
+          price,
+          change24h: parseFloat(item.priceChange) || 0,
+          changePct24h: parseFloat(item.priceChangePercent) || 0,
+          quoteVolume: parseFloat(item.quoteVolume || "0") || 0,
           category: "crypto",
-          source: "Binance Futures",
+          source: isTestnet && url.includes("testnet") ? "Binance Testnet" : "Binance Futures",
           updatedAt: nowStr,
         });
       }
+      if (list.length > 0) {
+        list.sort((a, b) => {
+          const ra = topRank.has(a.symbol) ? topRank.get(a.symbol)! : 9999;
+          const rb = topRank.has(b.symbol) ? topRank.get(b.symbol)! : 9999;
+          if (ra !== rb) return ra - rb;
+          return b.quoteVolume - a.quoteVolume;
+        });
+        return list;
+      }
+    } catch {
+      // fallback to next endpoint
     }
-  } catch {
-    // silent fallback
   }
-  return result;
+  return [];
 }
 
 router.get("/prices", async (req, res) => {
   try {
-    const prices: Array<{
-      symbol: string;
-      price: number;
-      change24h: number | null;
-      changePct24h: number | null;
-      category: string;
-      source: string;
-      updatedAt: string;
-    }> = [];
-
-    const seenSymbols = new Set<string>();
-
-    // 1. Fetch live prices from database scanned_assets
-    try {
-      const dbAssets = await db.select().from(scannedAssetsTable);
-      for (const asset of dbAssets) {
-        const parts = asset.symbolPair.split('/');
-        if (parts.length === 2) {
-          const priceA = Number(asset.priceA ?? 0);
-          const priceB = Number(asset.priceB ?? 0);
-          
-          const pushSymbol = (sym: string, price: number) => {
-            if (price > 0 && !seenSymbols.has(sym)) {
-              prices.push({
-                symbol: sym,
-                price,
-                change24h: null,
-                changePct24h: null,
-                category: "crypto",
-                source: "Binance Futures",
-                updatedAt: asset.updatedAt?.toISOString() ?? new Date().toISOString(),
-              });
-              seenSymbols.add(sym);
-            }
-          };
-
-          pushSymbol(parts[0], priceA);
-          pushSymbol(parts[1], priceB);
-        }
-      }
-    } catch (dbErr) {
-      // silent fallback
-    }
-
-    // 2. Fetch live crypto prices from Binance
-    const cryptoFutures = await fetchBinanceFuturesPrices();
-    for (const item of cryptoFutures) {
-      if (!seenSymbols.has(item.symbol)) {
-        prices.push(item);
-        seenSymbols.add(item.symbol);
-      }
-    }
-
-    res.json(prices);
+    const q = String(req.query.q ?? "").trim().toUpperCase();
+    const limit = Math.min(200, Math.max(10, Number(req.query.limit ?? 60) || 60));
+    const all = await fetchBinanceFuturesPrices();
+    const filtered = q ? all.filter((p) => p.symbol.includes(q)) : all;
+    return res.json(filtered.slice(0, limit));
   } catch (err) {
-    req.log.error({ err }, "Failed to fetch prices");
-    res.status(500).json({ error: "Failed to fetch prices" });
+    req.log.error({ err }, "Failed to fetch live Binance Futures prices");
+    return res.status(500).json({ error: "Failed to fetch live prices" });
   }
 });
 

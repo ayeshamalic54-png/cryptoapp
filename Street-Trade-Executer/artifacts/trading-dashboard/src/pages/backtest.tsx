@@ -1,269 +1,325 @@
 import { useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
-import { Play, TrendingUp, Award, DollarSign, Activity, AlertCircle } from "lucide-react";
+import { Play, TrendingUp, Award, DollarSign, Activity, Shield } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { cn } from "@/lib/utils";
+import { cn, formatCryptoPrice, formatUsdt, formatPktDateTime } from "@/lib/utils";
+import { getApiUrl } from "@/lib/api";
+import { BinanceCoinSearch } from "@/components/BinanceCoinSearch";
 
-interface TradeSim {
-  type: string;
-  entryPriceA: number;
-  exitPriceA: number;
-  entryPriceB: number;
-  exitPriceB: number;
-  beta: number;
-  zScoreAtExit: number;
+interface CryptoTradeSim {
+  type: "BUY" | "SELL";
+  symbol: string;
+  qty: number;
+  marginUsed: number;
+  marginPct: number;
+  entryPrice: number;
+  exitPrice: number;
+  slPrice: number;
+  tpPrice: number;
+  targetRrr: number;
+  achievedRrr: number;
+  profitUsd: number;
   profitPercent: number;
-  profitAmount: number;
+  breakevenTriggered: boolean;
+  sessionLabel: string;
   reason: string;
-  time: string;
+  entryTime: string;
+  exitTime: string;
 }
 
-interface BacktestResponse {
-  symbolA: string;
-  symbolB: string;
+interface CryptoBacktestResponse {
+  symbol: string;
+  accountMode: string;
+  leverage: number;
+  maxMarginPct: number;
   totalTrades: number;
   wins: number;
   losses: number;
+  breakevens: number;
   winRate: number;
+  avgRrr: number;
+  maxDrawdownPct: number;
   initialBalance: number;
   finalBalance: number;
   netProfit: number;
   profitFactor: number;
   equityCurve: Array<{ time: string; balance: number }>;
-  trades: Array<TradeSim>;
+  trades: CryptoTradeSim[];
 }
-
-import { getApiUrl } from "@/lib/api";
 
 export default function Backtest() {
   const { toast } = useToast();
-  const isReadOnly = localStorage.getItem("wasee_role") === "user";
-  const [symbolA, setSymbolA] = useState("BTCUSDT");
-  const [symbolB, setSymbolB] = useState("ETHUSDT");
-  const [zEntry, setZEntry] = useState("2.8");
-  const [zExit, setZExit] = useState("0.2");
-  const [zSl, setZSl] = useState("4.2");
-  const [slPercent, setSlPercent] = useState("2.0");
+  const isReadOnly = localStorage.getItem("wasee_role")?.toLowerCase() === "user";
+
+  const [symbol, setSymbol] = useState("BTCUSDT");
+  const [accountMode, setAccountMode] = useState<"PROP_FIRM" | "PERSONAL">("PROP_FIRM");
+  const [initialBalance, setInitialBalance] = useState("10000");
+  const [leverage, setLeverage] = useState("5");
+  const [riskPercent, setRiskPercent] = useState("1.0");
+  const [maxMarginPct, setMaxMarginPct] = useState("80");
+  const [maxSlPct, setMaxSlPct] = useState("1.2");
+  const [minRrr, setMinRrr] = useState("1.85");
+  const [days, setDays] = useState("14");
+  const [sessionFilterEnabled, setSessionFilterEnabled] = useState(false);
+  const [breakevenEnabled, setBreakevenEnabled] = useState(true);
   const [loading, setLoading] = useState(false);
-  const [results, setResults] = useState<BacktestResponse | null>(null);
+  const [results, setResults] = useState<CryptoBacktestResponse | null>(null);
+
+  const applyMode = (mode: "PROP_FIRM" | "PERSONAL", bal?: string) => {
+    setAccountMode(mode);
+    if (mode === "PROP_FIRM") {
+      setInitialBalance("10000");
+      setRiskPercent("1.0");
+      setLeverage("5");
+    } else {
+      setInitialBalance(bal || "100");
+      setRiskPercent(bal === "300" ? "2.0" : "3.0");
+      setLeverage("5");
+    }
+  };
 
   const handleRunBacktest = async () => {
-    if (!symbolA || !symbolB) {
-      toast({ title: "Symbols required", description: "Please specify both symbols.", variant: "destructive" });
-      return;
-    }
     setLoading(true);
     try {
       const res = await fetch(getApiUrl("/api/backtest"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          symbolA: symbolA.trim().toUpperCase(),
-          symbolB: symbolB.trim().toUpperCase(),
-          zEntry: parseFloat(zEntry),
-          zExit: parseFloat(zExit),
-          zSl: parseFloat(zSl),
-          slPercent: parseFloat(slPercent),
+          symbol,
+          accountMode,
+          initialBalance: parseFloat(initialBalance) || 10000,
+          leverage: parseInt(leverage, 10) || 5,
+          riskPercent: parseFloat(riskPercent) || 1.0,
+          maxMarginPct: Math.min(80, parseFloat(maxMarginPct) || 80),
+          maxSlPct: parseFloat(maxSlPct) || 1.2,
+          minRrr: parseFloat(minRrr) || 1.85,
+          days: parseInt(days, 10) || 14,
+          sessionFilterEnabled,
+          breakevenEnabled,
         }),
       });
-
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.error || "Failed to run backtest");
+        throw new Error(err.error || "Backtest failed");
       }
-
-      const data = (await res.json()) as BacktestResponse;
+      const data = (await res.json()) as CryptoBacktestResponse;
       setResults(data);
-      toast({ title: "Backtest Completed", description: `Simulated ${data.totalTrades} trades for ${data.symbolA}/${data.symbolB}` });
-    } catch (err) {
-      toast({ title: "Backtest Failed", description: (err as Error).message, variant: "destructive" });
+      toast({
+        title: `9-Step SMC Simulation Complete`,
+        description: `${data.symbol}: ${data.totalTrades} trades | Win Rate ${data.winRate}% | Net ${formatUsdt(data.netProfit, true)}`,
+      });
+    } catch (err: any) {
+      toast({ title: "Backtest Failed", description: err?.message, variant: "destructive" });
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="flex flex-col h-full overflow-auto bg-background p-6 space-y-6">
+    <div className="flex flex-col h-full overflow-auto bg-background p-4 sm:p-6 space-y-6">
       <div>
-        <h2 className="text-2xl font-bold tracking-tight text-foreground">Arbitrage Backtesting</h2>
-        <p className="text-sm text-muted-foreground">Run co-integration Kalman Filter simulations on Binance Futures historical data</p>
+        <h2 className="text-2xl font-bold tracking-tight text-foreground">
+          Crypto Futures Pure 9-Condition SMC Backtester
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          Zero lookahead M15 + M5 Binance Futures simulation · Test Top 10 coins OR search any Binance perpetual
+        </p>
       </div>
 
-      {/* Control Panel Card */}
-      <Card className="bg-card border-border border-t-2 border-t-indigo-500/70 shadow-[0_4px_20px_rgba(99,102,241,0.05)]">
-        <CardHeader>
-          <CardTitle className="text-sm text-muted-foreground uppercase tracking-wider">Backtest Parameters</CardTitle>
+      {/* Control Panel */}
+      <Card className="bg-card border-border border-t-2 border-t-indigo-500/70">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm text-muted-foreground uppercase tracking-wider font-mono">
+            Strategy &amp; Capital Configuration
+          </CardTitle>
+          <CardDescription className="text-xs">
+            S1 M15 Bias → S2 M5 Sweep → S3 CHoCH → S4 Displacement FVG → S5 Closed Retest → S6 Rejection → S7 Close → S8 Sweep SL → S9 Opposing M15 Target (≥1.85R)
+          </CardDescription>
         </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-4 items-end">
+        <CardContent className="space-y-5">
+          <BinanceCoinSearch
+            selectedSymbol={symbol}
+            onSelectSymbol={(sym) => setSymbol(sym)}
+            title="Select Backtest Coin (Top 10 or Search All Binance Perpetuals)"
+          />
+
+          {/* Account Mode Pills */}
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-border">
+            <span className="text-xs font-mono text-zinc-400">Account Simulation Mode:</span>
+            <Button type="button" size="sm" variant={accountMode === "PROP_FIRM" ? "default" : "outline"} onClick={() => applyMode("PROP_FIRM")} className="h-7 text-xs font-mono">
+              Blue Guardian Prop ($10k)
+            </Button>
+            <Button type="button" size="sm" variant={accountMode === "PERSONAL" && initialBalance === "50" ? "default" : "outline"} onClick={() => applyMode("PERSONAL", "50")} className="h-7 text-xs font-mono">
+              Personal $50 USDT
+            </Button>
+            <Button type="button" size="sm" variant={accountMode === "PERSONAL" && initialBalance === "100" ? "default" : "outline"} onClick={() => applyMode("PERSONAL", "100")} className="h-7 text-xs font-mono">
+              Personal $100 USDT
+            </Button>
+            <Button type="button" size="sm" variant={accountMode === "PERSONAL" && initialBalance === "300" ? "default" : "outline"} onClick={() => applyMode("PERSONAL", "300")} className="h-7 text-xs font-mono">
+              Personal $300 USDT
+            </Button>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 items-end">
             <div>
-              <label className="text-xs text-muted-foreground uppercase font-mono block mb-1">Symbol A</label>
-              <Input value={symbolA} onChange={(e) => setSymbolA(e.target.value)} className="font-mono text-xs uppercase" />
+              <label className="text-[10px] text-zinc-400 uppercase font-mono block mb-1">Capital (USDT)</label>
+              <Input value={initialBalance} onChange={(e) => setInitialBalance(e.target.value)} className="font-mono text-xs bg-zinc-950" />
             </div>
             <div>
-              <label className="text-xs text-muted-foreground uppercase font-mono block mb-1">Symbol B</label>
-              <Input value={symbolB} onChange={(e) => setSymbolB(e.target.value)} className="font-mono text-xs uppercase" />
+              <label className="text-[10px] text-zinc-400 uppercase font-mono block mb-1">Leverage (x)</label>
+              <Input value={leverage} onChange={(e) => setLeverage(e.target.value)} className="font-mono text-xs bg-zinc-950" />
             </div>
             <div>
-              <label className="text-xs text-muted-foreground uppercase font-mono block mb-1">Z Entry</label>
-              <Input value={zEntry} onChange={(e) => setZEntry(e.target.value)} className="font-mono text-xs" />
+              <label className="text-[10px] text-zinc-400 uppercase font-mono block mb-1">Risk / Trade (%)</label>
+              <Input value={riskPercent} onChange={(e) => setRiskPercent(e.target.value)} className="font-mono text-xs bg-zinc-950" />
             </div>
             <div>
-              <label className="text-xs text-muted-foreground uppercase font-mono block mb-1">Z Exit</label>
-              <Input value={zExit} onChange={(e) => setZExit(e.target.value)} className="font-mono text-xs" />
+              <label className="text-[10px] text-zinc-400 uppercase font-mono block mb-1">Max Margin Cap %</label>
+              <Input value={maxMarginPct} onChange={(e) => setMaxMarginPct(e.target.value)} className="font-mono text-xs bg-zinc-950" />
             </div>
             <div>
-              <label className="text-xs text-muted-foreground uppercase font-mono block mb-1">Z Stop Loss</label>
-              <Input value={zSl} onChange={(e) => setZSl(e.target.value)} className="font-mono text-xs" />
+              <label className="text-[10px] text-zinc-400 uppercase font-mono block mb-1">Max SL (%)</label>
+              <Input value={maxSlPct} onChange={(e) => setMaxSlPct(e.target.value)} className="font-mono text-xs bg-zinc-950" />
             </div>
             <div>
-              <label className="text-xs text-muted-foreground uppercase font-mono block mb-1">SL % (Crypto)</label>
-              <Input value={slPercent} onChange={(e) => setSlPercent(e.target.value)} className="font-mono text-xs" />
+              <label className="text-[10px] text-zinc-400 uppercase font-mono block mb-1">Min R:R</label>
+              <Input value={minRrr} onChange={(e) => setMinRrr(e.target.value)} className="font-mono text-xs bg-zinc-950" />
+            </div>
+            <div>
+              <label className="text-[10px] text-zinc-400 uppercase font-mono block mb-1">Lookback Days</label>
+              <select value={days} onChange={(e) => setDays(e.target.value)} className="w-full h-9 rounded-md border border-input bg-zinc-950 px-2.5 text-xs font-mono">
+                <option value="3">3 Days</option>
+                <option value="7">7 Days</option>
+                <option value="14">14 Days</option>
+                <option value="30">30 Days</option>
+              </select>
             </div>
           </div>
-          <Button onClick={handleRunBacktest} disabled={loading || isReadOnly} className="w-full md:w-auto mt-4 gap-2 bg-indigo-600 hover:bg-indigo-700 font-mono text-xs tracking-wider">
-            <Play className="h-3.5 w-3.5 fill-current" />
-            {loading ? "SIMULATING..." : "RUN BACKTEST SIMULATION"}
-          </Button>
+
+          <div className="flex flex-wrap items-center justify-between gap-4 pt-2 border-t border-border">
+            <div className="flex flex-wrap items-center gap-6">
+              <label className="flex items-center gap-2 text-xs font-mono cursor-pointer">
+                <Switch checked={sessionFilterEnabled} onCheckedChange={setSessionFilterEnabled} />
+                <span>PKT Session Guard (12-4 PM &amp; 6-10 PM)</span>
+              </label>
+              <label className="flex items-center gap-2 text-xs font-mono cursor-pointer">
+                <Switch checked={breakevenEnabled} onCheckedChange={setBreakevenEnabled} />
+                <span>One-Time Risk-Free Breakeven (+1.0R / 60m)</span>
+              </label>
+            </div>
+            <Button onClick={handleRunBacktest} disabled={loading || isReadOnly} className="bg-indigo-600 hover:bg-indigo-500 font-mono text-xs font-bold gap-2">
+              <Play className="w-3.5 h-3.5 fill-current" />
+              {loading ? `SIMULATING ${symbol}...` : `RUN 9-STEP SMC BACKTEST (${symbol})`}
+            </Button>
+          </div>
         </CardContent>
       </Card>
 
       {results && (
         <>
-          {/* Stats Summary Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <Card className="bg-card border-border border-t-2 border-t-blue-500/70 shadow-[0_4px_20px_rgba(59,130,246,0.05)]">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-xs text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
-                  <Activity className="h-3.5 w-3.5" /> Total Trades
-                </CardTitle>
-              </CardHeader>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+            <Card className="bg-card border-border border-t-2 border-t-blue-500">
+              <CardHeader className="pb-1"><CardTitle className="text-[10px] text-muted-foreground uppercase font-mono">Total Trades</CardTitle></CardHeader>
               <CardContent>
-                <div className="text-2xl font-mono font-bold text-blue-500">{results.totalTrades}</div>
-                <div className="text-[10px] text-muted-foreground mt-1 font-mono">
-                  Wins: {results.wins}  -  Losses: {results.losses}
-                </div>
+                <div className="text-xl font-mono font-bold text-blue-400">{results.totalTrades}</div>
+                <div className="text-[10px] text-muted-foreground font-mono">{results.wins}W / {results.losses}L · {results.breakevens} BE</div>
               </CardContent>
             </Card>
-
-            <Card className="bg-card border-border border-t-2 border-t-green-500/70 shadow-[0_4px_20px_rgba(34,197,94,0.05)]">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-xs text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
-                  <Award className="h-3.5 w-3.5" /> Win Rate
-                </CardTitle>
-              </CardHeader>
+            <Card className="bg-card border-border border-t-2 border-t-green-500">
+              <CardHeader className="pb-1"><CardTitle className="text-[10px] text-muted-foreground uppercase font-mono">Win Rate</CardTitle></CardHeader>
               <CardContent>
-                <div className="text-2xl font-mono font-bold text-green-500">{results.winRate}%</div>
-                <div className="text-[10px] text-muted-foreground mt-1 font-mono">
-                  Win Rate target: &gt; 80%
-                </div>
+                <div className="text-xl font-mono font-bold text-emerald-400">{results.winRate}%</div>
+                <div className="text-[10px] text-muted-foreground font-mono">Avg R:R: {results.avgRrr}R</div>
               </CardContent>
             </Card>
-
-            <Card className="bg-card border-border border-t-2 border-t-emerald-500/70 shadow-[0_4px_20px_rgba(16,185,129,0.05)]">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-xs text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
-                  <DollarSign className="h-3.5 w-3.5" /> Net Profit
-                </CardTitle>
-              </CardHeader>
+            <Card className="bg-card border-border border-t-2 border-t-emerald-500">
+              <CardHeader className="pb-1"><CardTitle className="text-[10px] text-muted-foreground uppercase font-mono">Net Profit</CardTitle></CardHeader>
               <CardContent>
-                <div className={cn("text-2xl font-mono font-bold", results.netProfit >= 0 ? "text-green-500" : "text-red-500")}>
-                  {results.netProfit >= 0 ? "+" : ""}${results.netProfit}
+                <div className={cn("text-xl font-mono font-bold", results.netProfit >= 0 ? "text-emerald-400" : "text-rose-400")}>
+                  {formatUsdt(results.netProfit, true)}
                 </div>
-                <div className="text-[10px] text-muted-foreground mt-1 font-mono">
-                  Initial balance: $10,000
-                </div>
+                <div className="text-[10px] text-muted-foreground font-mono">After taker fees</div>
               </CardContent>
             </Card>
-
-            <Card className="bg-card border-border border-t-2 border-t-purple-500/70 shadow-[0_4px_20px_rgba(168,85,247,0.05)]">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-xs text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
-                  <TrendingUp className="h-3.5 w-3.5" /> Final Balance
-                </CardTitle>
-              </CardHeader>
+            <Card className="bg-card border-border border-t-2 border-t-purple-500">
+              <CardHeader className="pb-1"><CardTitle className="text-[10px] text-muted-foreground uppercase font-mono">Final Balance</CardTitle></CardHeader>
               <CardContent>
-                <div className="text-2xl font-mono font-bold text-purple-500">${results.finalBalance}</div>
-                <div className="text-[10px] text-muted-foreground mt-1 font-mono">
-                  P&L Factor: {results.profitFactor}
-                </div>
+                <div className="text-xl font-mono font-bold text-purple-400">{formatUsdt(results.finalBalance)}</div>
+                <div className="text-[10px] text-muted-foreground font-mono">Profit Factor: {results.profitFactor}</div>
+              </CardContent>
+            </Card>
+            <Card className="bg-card border-border border-t-2 border-t-rose-500">
+              <CardHeader className="pb-1"><CardTitle className="text-[10px] text-muted-foreground uppercase font-mono">Max Drawdown</CardTitle></CardHeader>
+              <CardContent>
+                <div className="text-xl font-mono font-bold text-rose-400">{results.maxDrawdownPct}%</div>
+                <div className="text-[10px] text-muted-foreground font-mono">Cap ≤ {results.maxMarginPct}% Margin</div>
+              </CardContent>
+            </Card>
+            <Card className="bg-card border-border border-t-2 border-t-cyan-500">
+              <CardHeader className="pb-1"><CardTitle className="text-[10px] text-muted-foreground uppercase font-mono">Config Mode</CardTitle></CardHeader>
+              <CardContent>
+                <div className="text-sm font-mono font-bold text-cyan-400">{results.accountMode}</div>
+                <div className="text-[10px] text-muted-foreground font-mono">{results.leverage}x · Start ${results.initialBalance}</div>
               </CardContent>
             </Card>
           </div>
 
-          {/* Equity Chart & Simulated Trades */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {/* Equity Curve Chart */}
-            <Card className="md:col-span-1 bg-card border-border">
-              <CardHeader>
-                <CardTitle className="text-xs text-muted-foreground uppercase tracking-wider">Equity Curve</CardTitle>
-              </CardHeader>
-              <CardContent className="h-[250px] pb-4">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <Card className="bg-card border-border">
+              <CardHeader><CardTitle className="text-xs text-muted-foreground uppercase font-mono">Equity Curve (USDT)</CardTitle></CardHeader>
+              <CardContent className="h-[280px]">
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={results.equityCurve} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#2a2f3a" />
-                    <XAxis dataKey="time" stroke="#71717a" fontSize={10} />
+                  <LineChart data={results.equityCurve}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+                    <XAxis dataKey="time" tickFormatter={(v) => new Date(v).toLocaleDateString("en-GB", { timeZone: "Asia/Karachi", day: "2-digit", month: "2-digit" })} stroke="#71717a" fontSize={10} />
                     <YAxis stroke="#71717a" fontSize={10} domain={["auto", "auto"]} />
-                    <Tooltip contentStyle={{ backgroundColor: "#18181b", borderColor: "#27272a" }} />
-                    <Line type="monotone" dataKey="balance" stroke="#3b82f6" strokeWidth={2} dot={false} />
+                    <Tooltip labelFormatter={(v) => formatPktDateTime(String(v))} contentStyle={{ backgroundColor: "#090d16", borderColor: "#27272a", fontFamily: "monospace", fontSize: 11 }} />
+                    <Line type="monotone" dataKey="balance" stroke="#10b981" strokeWidth={2} dot={false} isAnimationActive={false} />
                   </LineChart>
                 </ResponsiveContainer>
               </CardContent>
             </Card>
 
-            {/* Simulated Trades List */}
-            <Card className="md:col-span-2 bg-card border-border">
-              <CardHeader>
-                <CardTitle className="text-xs text-muted-foreground uppercase tracking-wider">Simulated Trades List (Last 30)</CardTitle>
-              </CardHeader>
-              <CardContent className="p-0 max-h-[250px] overflow-y-auto">
+            <Card className="lg:col-span-2 bg-card border-border">
+              <CardHeader><CardTitle className="text-xs text-muted-foreground uppercase font-mono">Simulated Futures Trades (PKT Timezone)</CardTitle></CardHeader>
+              <CardContent className="p-0 max-h-[300px] overflow-y-auto">
                 <Table>
-                  <TableHeader className="bg-muted/50 sticky top-0">
-                    <TableRow className="border-border">
-                      <TableHead className="font-mono text-[10px] py-2">TIME</TableHead>
-                      <TableHead className="font-mono text-[10px] py-2">TYPE</TableHead>
-                      <TableHead className="font-mono text-[10px] py-2 text-right">ENTRY A / B</TableHead>
-                      <TableHead className="font-mono text-[10px] py-2 text-right">EXIT A / B</TableHead>
-                      <TableHead className="font-mono text-[10px] py-2 text-right">RETURN</TableHead>
-                      <TableHead className="font-mono text-[10px] py-2 text-center">REASON</TableHead>
+                  <TableHeader className="bg-muted/40 sticky top-0">
+                    <TableRow>
+                      <TableHead className="font-mono text-[10px]">ENTRY (PKT)</TableHead>
+                      <TableHead className="font-mono text-[10px]">SIDE</TableHead>
+                      <TableHead className="font-mono text-[10px] text-right">ENTRY / EXIT</TableHead>
+                      <TableHead className="font-mono text-[10px] text-right">MARGIN %</TableHead>
+                      <TableHead className="font-mono text-[10px] text-right">R:R</TableHead>
+                      <TableHead className="font-mono text-[10px] text-right">PNL (USDT)</TableHead>
+                      <TableHead className="font-mono text-[10px] text-center">RESULT</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {results.trades.map((t, idx) => (
-                      <TableRow key={idx} className="border-border hover:bg-muted/30">
-                        <TableCell className="font-mono text-[10px] py-2 text-muted-foreground">
-                          {new Date(t.time).toLocaleTimeString()}
-                        </TableCell>
-                        <TableCell className="py-2">
-                          <Badge variant="outline" className={cn(
-                            "rounded-sm text-[9px] font-mono px-1 py-0",
-                            t.type === "BUY" ? "bg-green-500/10 text-green-500 border-green-500/20" : "bg-red-500/10 text-red-500 border-red-500/20"
-                          )}>
-                            {t.type}
+                      <TableRow key={idx} className="border-border">
+                        <TableCell className="font-mono text-[10px] text-zinc-400 whitespace-nowrap">{formatPktDateTime(t.entryTime)}</TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className={cn("text-[9px] font-mono", t.type === "BUY" ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" : "bg-rose-500/15 text-rose-400 border-rose-500/30")}>
+                            {t.type === "BUY" ? "LONG" : "SHORT"}
                           </Badge>
                         </TableCell>
-                        <TableCell className="font-mono text-[10px] py-2 text-right">
-                          {t.entryPriceA.toFixed(2)} / {t.entryPriceB.toFixed(2)}
+                        <TableCell className="font-mono text-[10px] text-right">
+                          {formatCryptoPrice(t.entryPrice)} → {formatCryptoPrice(t.exitPrice)}
                         </TableCell>
-                        <TableCell className="font-mono text-[10px] py-2 text-right">
-                          {t.exitPriceA.toFixed(2)} / {t.exitPriceB.toFixed(2)}
+                        <TableCell className="font-mono text-[10px] text-right text-sky-400">{t.marginPct}%</TableCell>
+                        <TableCell className="font-mono text-[10px] text-right">{t.achievedRrr}R</TableCell>
+                        <TableCell className={cn("font-mono text-[10px] text-right font-bold", t.profitUsd >= 0 ? "text-emerald-400" : "text-rose-400")}>
+                          {formatUsdt(t.profitUsd, true)}
                         </TableCell>
-                        <TableCell className={cn(
-                          "font-mono text-[10px] py-2 text-right font-bold",
-                          t.profitPercent >= 0 ? "text-green-500" : "text-red-500"
-                        )}>
-                          {t.profitPercent >= 0 ? "+" : ""}{t.profitPercent.toFixed(2)}%
-                        </TableCell>
-                        <TableCell className="py-2 text-center">
-                          <Badge variant="outline" className={cn(
-                            "rounded-sm text-[9px] font-mono px-1 py-0",
-                            t.reason === "TP_REVERSION" ? "bg-green-500/10 text-green-500 border-green-500/20" : "bg-red-500/10 text-red-500 border-red-500/20"
-                          )}>
+                        <TableCell className="text-center">
+                          <Badge variant="outline" className={cn("text-[9px] font-mono", t.reason === "TP_HIT" ? "bg-emerald-500/10 text-emerald-400" : t.reason === "BREAKEVEN_LOCKED" ? "bg-cyan-500/10 text-cyan-400" : "bg-rose-500/10 text-rose-400")}>
                             {t.reason}
                           </Badge>
                         </TableCell>

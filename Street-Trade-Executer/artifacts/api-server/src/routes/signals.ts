@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
-import { signalsTable, tradesTable } from "@workspace/db";
-import { desc, inArray } from "drizzle-orm";
+import { signalsTable, tradesTable, botStateTable } from "@workspace/db";
+import { desc, eq, inArray } from "drizzle-orm";
 import { GetSignalsQueryParams } from "@workspace/api-zod";
 
 const router = Router();
@@ -10,24 +10,33 @@ router.get("/signals", async (req, res) => {
   try {
     const parsed = GetSignalsQueryParams.safeParse(req.query);
     const limit = parsed.success ? (parsed.data.limit ?? 30) : 30;
+    const includeLegacy = req.query.all === "true";
 
-    const rows = await db
-      .select()
-      .from(signalsTable)
-      .orderBy(desc(signalsTable.timestamp))
-      .limit(limit);
+    const [botRows, rows] = await Promise.all([
+      db.select().from(botStateTable).where(eq(botStateTable.id, 1)).limit(1),
+      db.select().from(signalsTable).orderBy(desc(signalsTable.timestamp)).limit(limit),
+    ]);
 
-    const signalIds = rows.map((s) => s.id);
-    const trades = signalIds.length > 0
-      ? await db.select().from(tradesTable).where(inArray(tradesTable.signalId, signalIds))
-      : [];
+    const resetAtMs =
+      !includeLegacy && botRows[0]?.metricsResetAt ? new Date(botRows[0].metricsResetAt).getTime() : 0;
 
-    res.json(
-      rows.map((s) => {
+    const filteredRows = rows.filter((s) => {
+      if (resetAtMs && s.timestamp && s.timestamp.getTime() < resetAtMs) return false;
+      return true;
+    });
+
+    const signalIds = filteredRows.map((s) => s.id);
+    const trades =
+      signalIds.length > 0
+        ? await db.select().from(tradesTable).where(inArray(tradesTable.signalId, signalIds))
+        : [];
+
+    return res.json(
+      filteredRows.map((s) => {
         const tradesForSignal = trades.filter((t) => t.signalId === s.id);
         const totalLots = tradesForSignal.reduce((sum, t) => sum + Number(t.lots), 0);
-        const hasProfitVal = tradesForSignal.some(t => t.profit != null);
-        const totalProfit = hasProfitVal 
+        const hasProfitVal = tradesForSignal.some((t) => t.profit != null);
+        const totalProfit = hasProfitVal
           ? tradesForSignal.reduce((sum, t) => sum + Number(t.profit ?? 0), 0)
           : null;
 
@@ -58,7 +67,7 @@ router.get("/signals", async (req, res) => {
     );
   } catch (err) {
     req.log.error({ err }, "Failed to get signals");
-    res.status(500).json({ error: "Failed to get signals" });
+    return res.status(500).json({ error: "Failed to get signals" });
   }
 });
 

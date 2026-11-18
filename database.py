@@ -248,6 +248,47 @@ def initialize_database():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp DESC);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_scanned_assets_updated ON scanned_assets(updated_at DESC);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_fvg_zones_symbol ON fvg_zones(symbol);")
+        cur.execute("""
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS account_mode VARCHAR(20) DEFAULT 'PROP_FIRM';
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS leverage INTEGER DEFAULT 5;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS risk_percent NUMERIC(5,2) DEFAULT 1.00;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS max_margin_pct NUMERIC(5,2) DEFAULT 80.00;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS max_sl_pct NUMERIC(5,2) DEFAULT 1.20;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS halt_drawdown_limit NUMERIC(5,2) DEFAULT 3.50;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS max_drawdown_limit NUMERIC(5,2) DEFAULT 4.00;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS guardian_shield_pct NUMERIC(5,2) DEFAULT 1.80;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS session_guard_enabled BOOLEAN DEFAULT FALSE;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS session_start_hour NUMERIC(4,2) DEFAULT 12.00;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS session_end_hour NUMERIC(4,2) DEFAULT 16.00;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS session2_enabled BOOLEAN DEFAULT TRUE;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS session2_start_hour NUMERIC(4,2) DEFAULT 18.00;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS session2_end_hour NUMERIC(4,2) DEFAULT 22.00;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS is_bot_running BOOLEAN DEFAULT TRUE;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS metrics_reset_at TIMESTAMP DEFAULT NULL;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS knife_protection_enabled BOOLEAN DEFAULT FALSE;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS obi_enabled BOOLEAN DEFAULT FALSE;
+            ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS volatility_filter_enabled BOOLEAN DEFAULT FALSE;
+            ALTER TABLE trades ADD COLUMN IF NOT EXISTS sl NUMERIC(20, 8);
+            ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp NUMERIC(20, 8);
+            ALTER TABLE trades ADD COLUMN IF NOT EXISTS mt5_login BIGINT DEFAULT 0;
+            CREATE TABLE IF NOT EXISTS smc_telemetry (
+                symbol VARCHAR(25) PRIMARY KEY,
+                m15_bias VARCHAR(30) DEFAULT 'NEUTRAL',
+                sweep_status VARCHAR(80) DEFAULT 'FAIL',
+                sweep_price NUMERIC(20, 8) DEFAULT 0,
+                choch_status VARCHAR(80) DEFAULT 'FAIL',
+                choch_price NUMERIC(20, 8) DEFAULT 0,
+                fvg_status VARCHAR(80) DEFAULT 'FAIL',
+                fvg_bounds_json TEXT DEFAULT '{}',
+                retest_status VARCHAR(80) DEFAULT 'FAIL',
+                s6_status VARCHAR(80) DEFAULT 'FAIL',
+                s7_status VARCHAR(80) DEFAULT 'FAIL',
+                s8_status VARCHAR(100) DEFAULT '',
+                s9_status VARCHAR(100) DEFAULT '',
+                action VARCHAR(20) DEFAULT 'NONE',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
         conn.commit()
 
         cur.close()
@@ -681,3 +722,190 @@ def reset_database_metrics_for_new_account(login_id, equity):
 
 if __name__ == "__main__":
     initialize_database()
+
+
+def log_smc_zones_full(symbol, zones_dict):
+    """Stores all 4 SMC zone families (FVG, iFVG, OB, BREAKER) cleanly for chart & dashboard."""
+    conn = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM fvg_zones WHERE symbol = %s", (symbol.upper(),))
+        zone_types = [
+            "bullish_fvg", "bearish_fvg",
+            "bullish_ifvg", "bearish_ifvg",
+            "bullish_ob", "bearish_ob",
+            "bullish_breaker", "bearish_breaker",
+        ]
+        for ztype in zone_types:
+            for item in zones_dict.get(ztype, []) or []:
+                low_p = float(item[0])
+                high_p = float(item[1])
+                if high_p > low_p:
+                    cur.execute(
+                        "INSERT INTO fvg_zones (symbol, zone_type, low_price, high_price, updated_at) VALUES (%s, %s, %s, %s, NOW())",
+                        (symbol.upper(), ztype, low_p, high_p),
+                    )
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        print(f"DB Error log_smc_zones_full: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def update_smc_telemetry(symbol, tel):
+    """Persists real-time 9-Step SMC telemetry & candle snapshot JSON for live UI chart overlay."""
+    if not tel:
+        return
+    conn = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO smc_telemetry (
+                symbol, m15_bias, sweep_status, sweep_price,
+                choch_status, choch_price, fvg_status, fvg_bounds_json,
+                retest_status, s6_status, s7_status, s8_status, s9_status,
+                action, updated_at
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+            ON CONFLICT (symbol) DO UPDATE SET
+                m15_bias = EXCLUDED.m15_bias,
+                sweep_status = EXCLUDED.sweep_status,
+                sweep_price = EXCLUDED.sweep_price,
+                choch_status = EXCLUDED.choch_status,
+                choch_price = EXCLUDED.choch_price,
+                fvg_status = EXCLUDED.fvg_status,
+                fvg_bounds_json = EXCLUDED.fvg_bounds_json,
+                retest_status = EXCLUDED.retest_status,
+                s6_status = EXCLUDED.s6_status,
+                s7_status = EXCLUDED.s7_status,
+                s8_status = EXCLUDED.s8_status,
+                s9_status = EXCLUDED.s9_status,
+                action = EXCLUDED.action,
+                updated_at = NOW()
+            """,
+            (
+                symbol.upper(),
+                str(tel.get("m15_bias", "NEUTRAL ⚪"))[:30],
+                str(tel.get("sweep_status", "FAIL"))[:80],
+                float(tel.get("sweep_price", 0) or 0),
+                str(tel.get("choch_status", "FAIL"))[:80],
+                float(tel.get("choch_price", 0) or 0),
+                str(tel.get("fvg_status", "FAIL"))[:80],
+                str(tel.get("fvg_bounds_json", "{}")),
+                str(tel.get("retest_status", "FAIL"))[:80],
+                str(tel.get("s6_status", "FAIL"))[:80],
+                str(tel.get("s7_status", "FAIL"))[:80],
+                str(tel.get("s8_status", ""))[:100],
+                str(tel.get("s9_status", ""))[:100],
+                str(tel.get("action", "NONE"))[:20],
+            ),
+        )
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        print(f"DB Error update_smc_telemetry: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def save_trade_sl_tp(ticket, sl=0.0, tp=0.0, mt5_login=0):
+    """Saves exact structural SL & TP on a live Crypto Futures trade row."""
+    conn = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE trades SET sl = %s, tp = %s, mt5_login = %s WHERE ticket = %s",
+            (float(sl or 0), float(tp or 0), int(mt5_login or 0), int(ticket)),
+        )
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        print(f"DB Error save_trade_sl_tp: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def cleanup_stale_scanned_assets(valid_symbols):
+    """Removes legacy Z-score pair rows (containing '/') or disabled coins from scanned_assets."""
+    conn = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM scanned_assets WHERE symbol_pair LIKE '%/%'")
+        if valid_symbols:
+            upper = [s.upper() for s in valid_symbols]
+            cur.execute("DELETE FROM scanned_assets WHERE NOT (UPPER(symbol_pair) = ANY(%s))", (upper,))
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        print(f"DB Error cleanup_stale_scanned_assets: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_crypto_bot_settings():
+    """Fetches complete Pure Crypto Futures SMC configuration & Session Guard state from bot_state."""
+    conn = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT active_pair, auto_execute, smc_enabled, risk_limits_enabled,
+                   max_trades, default_lots, sl_pips, tp_pips,
+                   initial_balance, max_equity_peak, overall_drawdown,
+                   account_mode, leverage, risk_percent, max_margin_pct, max_sl_pct,
+                   halt_drawdown_limit, max_drawdown_limit, guardian_shield_pct,
+                   session_guard_enabled, session_start_hour, session_end_hour,
+                   session2_enabled, session2_start_hour, session2_end_hour,
+                   is_bot_running, metrics_reset_at
+            FROM bot_state
+            ORDER BY id ASC
+            LIMIT 1
+        """)
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return {}
+        return {
+            "active_pair": str(row[0] or "BTCUSDT").split("/")[0].strip().upper(),
+            "auto_execute": bool(row[1]) if row[1] is not None else True,
+            "smc_enabled": bool(row[2]) if row[2] is not None else True,
+            "risk_limits_enabled": bool(row[3]) if row[3] is not None else True,
+            "max_trades": int(row[4] or 10),
+            "default_lots": float(row[5] or 0.01),
+            "sl_pct": float(row[6] or 1.2),
+            "tp_pct": float(row[7] or 2.4),
+            "initial_balance": float(row[8] or 10000.0),
+            "max_equity_peak": float(row[9] or 10000.0),
+            "overall_drawdown": float(row[10] or 0.0),
+            "account_mode": str(row[11] or "PROP_FIRM").upper(),
+            "leverage": int(row[12] or 5),
+            "risk_percent": float(row[13] or 1.0),
+            "max_margin_pct": min(80.0, float(row[14] or 80.0)),
+            "max_sl_pct": float(row[15] or 1.2),
+            "halt_drawdown_limit": float(row[16] or 3.5),
+            "max_drawdown_limit": float(row[17] or 4.0),
+            "guardian_shield_pct": float(row[18] or 1.8),
+            "session_guard_enabled": bool(row[19]) if row[19] is not None else False,
+            "session_start_hour": float(row[20] if row[20] is not None else 12.0),
+            "session_end_hour": float(row[21] if row[21] is not None else 16.0),
+            "session2_enabled": bool(row[22]) if row[22] is not None else True,
+            "session2_start_hour": float(row[23] if row[23] is not None else 18.0),
+            "session2_end_hour": float(row[24] if row[24] is not None else 22.0),
+            "is_bot_running": bool(row[25]) if row[25] is not None else True,
+            "metrics_reset_at": row[26],
+        }
+    except Exception as e:
+        print(f"DB Error get_crypto_bot_settings: {e}")
+        return {}
+    finally:
+        if conn:
+            conn.close()

@@ -10,6 +10,7 @@ import tradesRouter from "./trades";
 import backtestRouter from "./backtest";
 import backupRouter from "./backup";
 import authRouter from "./auth";
+import binanceRouter from "./binance";
 
 const router = Router();
 
@@ -24,5 +25,6 @@ router.use(tradesRouter);
 router.use(backtestRouter);
 router.use(backupRouter);
 router.use(authRouter);
+router.use(binanceRouter);
 
 export default router;

@@ -41,14 +41,13 @@ export function Layout({ children }: LayoutProps) {
 
   return (
     <div className="flex flex-col lg:flex-row min-h-screen bg-background text-foreground dark overflow-x-hidden">
-      
-      {/* -- MOBILE HEADER (Visible only on screens < lg) -- */}
+      {/* Mobile Header */}
       <div className="lg:hidden flex items-center justify-between px-4 py-3 bg-zinc-950 border-b border-zinc-900 shrink-0 sticky top-0 z-30">
         <div>
-          <h1 className="font-extrabold text-sm bg-gradient-to-r from-blue-400 to-indigo-500 bg-clip-text text-transparent tracking-tight">
-            JANE STREET QUANT
+          <h1 className="font-extrabold text-sm bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent tracking-tight">
+            CRYPTO FUTURES SMC
           </h1>
-          <div className="text-[8px] text-zinc-500 uppercase tracking-widest font-mono">Terminal Engine</div>
+          <div className="text-[9px] text-zinc-500 uppercase tracking-widest font-mono">Binance 9-Step Pure SMC</div>
         </div>
         <button
           onClick={() => setIsMobileMenuOpen(true)}
@@ -58,31 +57,20 @@ export function Layout({ children }: LayoutProps) {
         </button>
       </div>
 
-      {/* -- MOBILE SLIDE-OVER DRAWER (Visible when menu is open) -- */}
+      {/* Mobile Drawer */}
       {isMobileMenuOpen && (
         <>
-          {/* Backdrop blur overlay */}
-          <div
-            onClick={() => setIsMobileMenuOpen(false)}
-            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 lg:hidden"
-          />
-          {/* Drawer panel */}
-          <div className="fixed inset-y-0 left-0 w-64 bg-zinc-950 border-r border-zinc-800 z-50 flex flex-col animate-in slide-in-from-left duration-200">
+          <div onClick={() => setIsMobileMenuOpen(false)} className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 lg:hidden" />
+          <div className="fixed inset-y-0 left-0 w-64 bg-zinc-950 border-r border-zinc-800 z-50 flex flex-col">
             <div className="p-4 border-b border-zinc-900 flex items-center justify-between">
               <div>
-                <h1 className="font-extrabold text-sm bg-gradient-to-r from-blue-400 to-indigo-500 bg-clip-text text-transparent tracking-tight">
-                  JANE STREET QUANT
-                </h1>
-                <div className="text-[8px] text-zinc-500 uppercase tracking-widest font-mono mt-0.5">Terminal Menu</div>
+                <h1 className="font-extrabold text-sm bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">CRYPTO FUTURES SMC</h1>
+                <div className="text-[9px] text-zinc-500 uppercase font-mono">Binance USDT-M</div>
               </div>
-              <button
-                onClick={() => setIsMobileMenuOpen(false)}
-                className="p-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-foreground"
-              >
+              <button onClick={() => setIsMobileMenuOpen(false)} className="p-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-400">
                 <X className="h-4 w-4" />
               </button>
             </div>
-            
             <nav className="flex-1 p-3 space-y-1.5 overflow-y-auto">
               {navItems.map((item) => (
                 <Link
@@ -90,9 +78,9 @@ export function Layout({ children }: LayoutProps) {
                   href={item.href}
                   onClick={() => setIsMobileMenuOpen(false)}
                   className={cn(
-                    "flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all duration-200 rounded-md border-l-2",
+                    "flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md border-l-2",
                     location === item.href
-                      ? "bg-primary/10 text-primary border-l-primary shadow-[0_0_15px_rgba(59,130,246,0.1)] font-semibold"
+                      ? "bg-primary/10 text-primary border-l-primary font-semibold"
                       : "text-zinc-400 border-l-transparent hover:text-foreground hover:bg-zinc-900/50"
                   )}
                 >
@@ -101,27 +89,24 @@ export function Layout({ children }: LayoutProps) {
                 </Link>
               ))}
             </nav>
-
-            <div className="p-4 border-t border-zinc-900 bg-zinc-950/40">
-              <button
-                onClick={handleLogout}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2 text-xs font-bold font-mono tracking-wider uppercase border border-red-500/30 rounded bg-red-500/10 text-red-400 hover:bg-red-500/25 hover:text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.1)] transition-all duration-300"
-              >
-                <LogOut className="h-3.5 w-3.5" />
-                SIGN OUT TERMINAL
+            <div className="p-4 border-t border-zinc-900">
+              <button onClick={handleLogout} className="w-full flex items-center justify-center gap-2 px-4 py-2 text-xs font-bold font-mono uppercase border border-red-500/30 rounded bg-red-500/10 text-red-400">
+                <LogOut className="h-3.5 w-3.5" /> SIGN OUT
               </button>
             </div>
           </div>
         </>
       )}
 
-      {/* -- DESKTOP SIDEBAR (Visible only on lg screens) -- */}
+      {/* Desktop Sidebar */}
       <div className="hidden lg:flex w-64 border-r border-zinc-800 bg-gradient-to-b from-zinc-950 to-black shrink-0 flex-col">
         <div className="p-4 border-b border-zinc-900">
-          <h1 className="font-extrabold text-lg bg-gradient-to-r from-blue-400 to-indigo-500 bg-clip-text text-transparent tracking-tight">
-            JANE STREET QUANT
+          <h1 className="font-extrabold text-lg bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent tracking-tight">
+            CRYPTO FUTURES SMC
           </h1>
-          <div className="text-[10px] text-zinc-500 uppercase tracking-widest font-mono mt-1">Terminal Engine</div>
+          <div className="text-[10px] text-zinc-500 uppercase tracking-widest font-mono mt-1">
+            Binance 9-Step Pure SMC
+          </div>
         </div>
         <nav className="flex-1 p-3 space-y-1.5">
           {navItems.map((item) => (
@@ -131,7 +116,7 @@ export function Layout({ children }: LayoutProps) {
               className={cn(
                 "flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all duration-200 rounded-md border-l-2",
                 location === item.href
-                  ? "bg-primary/10 text-primary border-l-primary shadow-[0_0_15px_rgba(59,130,246,0.1)] font-semibold"
+                  ? "bg-primary/10 text-primary border-l-primary font-semibold"
                   : "text-zinc-400 border-l-transparent hover:text-foreground hover:bg-zinc-900/50"
               )}
             >
@@ -140,11 +125,10 @@ export function Layout({ children }: LayoutProps) {
             </Link>
           ))}
         </nav>
-        
         <div className="p-4 border-t border-zinc-900 bg-zinc-950/40">
           <button
             onClick={handleLogout}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2 text-xs font-bold font-mono tracking-wider uppercase border border-red-500/30 rounded bg-red-500/10 text-red-400 hover:bg-red-500/25 hover:text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.1)] transition-all duration-300"
+            className="w-full flex items-center justify-center gap-2 px-4 py-2 text-xs font-bold font-mono uppercase border border-red-500/30 rounded bg-red-500/10 text-red-400 hover:bg-red-500/20"
           >
             <LogOut className="h-3.5 w-3.5" />
             SIGN OUT TERMINAL
@@ -152,10 +136,7 @@ export function Layout({ children }: LayoutProps) {
         </div>
       </div>
 
-      {/* -- MAIN CONTENT AREA -- */}
-      <main className="flex-1 flex flex-col min-w-0 overflow-x-hidden bg-zinc-950">
-        {children}
-      </main>
+      <main className="flex-1 flex flex-col min-w-0 overflow-x-hidden bg-zinc-950">{children}</main>
     </div>
   );
 }
