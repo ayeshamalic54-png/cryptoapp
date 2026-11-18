@@ -5,6 +5,7 @@ import { UpdateConfigBody } from "@workspace/api-zod";
 import { sql } from "drizzle-orm";
 import { resolveBinanceSymbol } from "../lib/smcEngine";
 import { getCryptoDiscordWebhookUrl, sendDiscordCryptoSignalAlert } from "../lib/discord";
+import { syncLeverageAcrossCoins } from "../lib/cryptoBotWorker";
 import { fetchBinanceKlines } from "./binance";
 
 const router = Router();
@@ -168,6 +169,7 @@ router.post("/config", async (req, res) => {
     );
 
     const updated = (await db.select().from(botStateTable).limit(1))[0];
+    void syncLeverageAcrossCoins(leverage, activeSym);
     return res.json(serializeConfig(updated));
   } catch (err) {
     req.log.error({ err }, "Failed to update config");

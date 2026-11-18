@@ -33,6 +33,8 @@ interface SymbolFilter {
 const filterCache = new Map<string, { ts: number; filter: SymbolFilter }>();
 const leverageCache = new Map<string, number>();
 const beLockedTickets = new Set<number>();
+const peakFloatingMap = new Map<number, number>();
+const closeConfirmCount = new Map<string, number>();
 const tradeCooldown = new Map<string, number>();
 const signalCooldown = new Map<string, number>();
 
@@ -42,6 +44,7 @@ let isFastTickRunning = false;
 let isScanTickRunning = false;
 let started = false;
 let peakEquityTracker = 0;
+let lastSyncedConfigLev = 0;
 
 function isTestnet(): boolean {
   return ["true", "1", "yes"].includes((process.env.USE_BINANCE_TESTNET || "").trim().toLowerCase());
@@ -170,18 +173,36 @@ function quantizeTick(price: number, tick: number): number {
   return Number(rounded.toFixed(decimals));
 }
 
-async function ensureLeverage(symbol: string, targetLev: number): Promise<number> {
+async function ensureLeverage(symbol: string, targetLev: number, force = false): Promise<number> {
   const lev = Math.max(1, Math.min(50, Math.round(targetLev || 5)));
-  if (leverageCache.get(symbol) === lev) return lev;
-  for (const cand of [lev, Math.min(lev, 20), Math.min(lev, 10), Math.min(lev, 5), 1]) {
-    const res = await signedBinanceRequest("POST", "/fapi/v1/leverage", { symbol, leverage: cand });
+  const symU = symbol.toUpperCase();
+  if (!force && leverageCache.get(symU) === lev) return lev;
+  for (const cand of [...new Set([lev, Math.min(lev, 20), Math.min(lev, 10), Math.min(lev, 5), 1])]) {
+    const res = await signedBinanceRequest("POST", "/fapi/v1/leverage", { symbol: symU, leverage: cand });
     if (res.ok) {
       const actual = Number(res.data?.leverage ?? cand);
-      leverageCache.set(symbol, actual);
+      leverageCache.set(symU, actual);
       return actual;
     }
+    logger.warn({ symbol: symU, cand, status: res.status, body: res.text.slice(0, 120) }, "Binance set leverage retry");
   }
   return lev;
+}
+
+export async function syncLeverageAcrossCoins(targetLev: number, extraSymbol?: string): Promise<void> {
+  if (!hasApiCreds()) return;
+  const lev = Math.max(1, Math.min(50, Math.round(targetLev || 5)));
+  const list = [...TOP_10_CRYPTO_COINS];
+  if (extraSymbol) {
+    const res = await resolveLiveBinanceSymbol(extraSymbol);
+    if (res && !list.includes(res)) list.push(res);
+  }
+  leverageCache.clear();
+  for (const sym of list) {
+    await ensureLeverage(sym, lev, true);
+  }
+  lastSyncedConfigLev = lev;
+  logger.info({ leverage: lev, symbols: list.length }, "Synced Binance Futures leverage across scanner coins");
 }
 
 async function getAccountSnapshot(): Promise<{
@@ -210,18 +231,17 @@ async function getAccountSnapshot(): Promise<{
     : Number(accRes.data?.availableBalance ?? wallet);
   const equityVal = accRes.data?.multiAssetsMargin && usdtMultiEq > 0 ? Math.max(marginBal, usdtMultiEq) : marginBal;
 
-  const positions = Array.isArray(posRes.data)
-    ? posRes.data
-        .filter((p) => Math.abs(Number(p.positionAmt || 0)) > 0)
-        .map((p) => ({
-          symbol: String(p.symbol),
-          side: Number(p.positionAmt) > 0 ? ("BUY" as const) : ("SELL" as const),
-          qty: Math.abs(Number(p.positionAmt)),
-          entryPrice: Number(p.entryPrice || 0),
-          markPrice: Number(p.markPrice || p.entryPrice || 0),
-          unrealizedPnl: Number(p.unRealizedProfit || 0),
-        }))
-    : [];
+  const positions = posRes.data
+    .filter((p) => Math.abs(Number(p.positionAmt || 0)) > 0)
+    .map((p) => ({
+      symbol: String(p.symbol),
+      side: Number(p.positionAmt) > 0 ? ("BUY" as const) : ("SELL" as const),
+      qty: Math.abs(Number(p.positionAmt)),
+      entryPrice: Number(p.entryPrice || 0),
+      markPrice: Number(p.markPrice || p.entryPrice || 0),
+      unrealizedPnl: Number(p.unRealizedProfit || 0),
+      leverage: Number(p.leverage || 0),
+    }));
 
   return { equity: Number(equityVal.toFixed(2)), avail: Number(avail.toFixed(2)), positions, statusCode: 200 };
 }
@@ -349,7 +369,8 @@ async function executeSingleFuturesOrder(
   const rQty = quantizeStep(qty, filter.stepSize, false);
   if (rQty <= 0 || rQty < filter.minQty) return { ok: false, error: `Qty ${rQty} < minQty ${filter.minQty}` };
 
-  await ensureLeverage(binSym, leverage);
+  const actualLev = await ensureLeverage(binSym, leverage, true);
+  logger.info({ symbol: binSym, requestedLev: leverage, actualLev }, "Binance leverage verified before entry");
   const orderRes = await signedBinanceRequest("POST", "/fapi/v1/order", {
     symbol: binSym,
     side,
@@ -387,13 +408,32 @@ async function executeSingleFuturesOrder(
   return { ok: true, orderId, fillPrice, sl: slRound, tp: tpRound };
 }
 
-async function closeSymbolPositions(targetSymbol: string, positions: any[], reason = "Closed") {
+async function closeSymbolPositions(targetSymbol: string, positions: any[], reason = "Closed"): Promise<{ closed: number; error?: string }> {
   const resolved = targetSymbol.toUpperCase() === "ALL" ? null : await resolveLiveBinanceSymbol(targetSymbol);
-  for (const pos of positions) {
-    if (resolved && pos.symbol !== resolved) continue;
-    await cancelAllOrders(pos.symbol);
+  let targets = positions.filter((pos) => !resolved || pos.symbol.toUpperCase() === resolved.toUpperCase());
+
+  // Fallback direct Binance position check if snapshot list missed target symbol
+  if (!targets.length && resolved) {
+    const directRes = await signedBinanceRequest("GET", "/fapi/v2/positionRisk", { symbol: resolved });
+    if (directRes.ok && Array.isArray(directRes.data)) {
+      targets = directRes.data
+        .filter((p) => Math.abs(Number(p.positionAmt || 0)) > 0)
+        .map((p) => ({
+          symbol: String(p.symbol),
+          side: Number(p.positionAmt) > 0 ? ("BUY" as const) : ("SELL" as const),
+          qty: Math.abs(Number(p.positionAmt)),
+          entryPrice: Number(p.entryPrice || 0),
+          markPrice: Number(p.markPrice || p.entryPrice || 0),
+          unrealizedPnl: Number(p.unRealizedProfit || 0),
+        }));
+    }
+  }
+
+  let closed = 0;
+  let lastErr: string | undefined;
+  for (const pos of targets) {
     const exitSide = pos.side === "BUY" ? "SELL" : "BUY";
-    const r = await signedBinanceRequest("POST", "/fapi/v1/order", {
+    let r = await signedBinanceRequest("POST", "/fapi/v1/order", {
       symbol: pos.symbol,
       side: exitSide,
       type: "MARKET",
@@ -401,31 +441,49 @@ async function closeSymbolPositions(targetSymbol: string, positions: any[], reas
       reduceOnly: "true",
       newOrderRespType: "RESULT",
     });
+    if (!r.ok && r.text.includes("-1106")) {
+      r = await signedBinanceRequest("POST", "/fapi/v1/order", {
+        symbol: pos.symbol,
+        side: exitSide,
+        type: "MARKET",
+        quantity: String(pos.qty),
+        newOrderRespType: "RESULT",
+      });
+    }
     if (r.ok) {
+      closed++;
+      await cancelAllOrders(pos.symbol);
       const closeP = Number(r.data?.avgPrice || 0) || pos.markPrice || pos.entryPrice;
       await reconcileClosedSymbol(pos.symbol, closeP, pos.unrealizedPnl, reason);
+    } else {
+      lastErr = `Binance close ${r.status}: ${r.text.slice(0, 140)}`;
+      logger.error({ symbol: pos.symbol, status: r.status, body: r.text }, "Binance close order rejected");
     }
   }
+  return { closed, error: lastErr };
 }
 
 async function reconcileClosedSymbol(symbol: string, fallbackClose = 0, fallbackPnl = 0, reason = "SL/TP Fill") {
   const openRows = (
-    await db.execute(sql`SELECT ticket, entry_time, entry_price, order_type, lots FROM trades WHERE status='OPEN' AND UPPER(symbol)=${symbol.toUpperCase()}`)
+    await db.execute(
+      sql`SELECT ticket, (EXTRACT(EPOCH FROM (entry_time AT TIME ZONE 'UTC')) * 1000) AS entry_ms, entry_price, order_type, lots
+          FROM trades WHERE status='OPEN' AND UPPER(symbol)=${symbol.toUpperCase()}`
+    )
   ).rows as any[];
   if (!openRows.length) return;
 
   let fills: any[] = [];
-  const uRes = await signedBinanceRequest("GET", "/fapi/v1/userTrades", { symbol, limit: 25 });
+  const uRes = await signedBinanceRequest("GET", "/fapi/v1/userTrades", { symbol, limit: 30 });
   if (uRes.ok && Array.isArray(uRes.data)) fills = uRes.data;
 
   for (const row of openRows) {
-    const entryMs = row.entry_time ? new Date(row.entry_time).getTime() : 0;
+    const entryMs = Number(row.entry_ms || 0);
     let rpnl = 0;
     let fees = 0;
     let closeP = fallbackClose || Number(row.entry_price || 0);
     let matched = false;
     for (const f of fills) {
-      if (Number(f.time || 0) >= entryMs - 5000) {
+      if (Number(f.time || 0) >= entryMs - 15_000) {
         const rp = Number(f.realizedPnl || 0);
         if (Math.abs(rp) > 0) {
           rpnl += rp;
@@ -438,11 +496,14 @@ async function reconcileClosedSymbol(symbol: string, fallbackClose = 0, fallback
       }
     }
     const netPnl = matched ? Number((rpnl - fees).toFixed(2)) : Number(fallbackPnl.toFixed(2));
+    const ticket = Number(row.ticket);
+    peakFloatingMap.delete(ticket);
+    beLockedTickets.delete(ticket);
     await db.execute(
-      sql`UPDATE trades SET close_price=${closeP.toString()}, profit=${netPnl.toString()}, close_time=NOW(), status='CLOSED' WHERE ticket=${Number(row.ticket)}`
+      sql`UPDATE trades SET close_price=${closeP.toString()}, profit=${netPnl.toString()}, close_time=NOW(), status='CLOSED' WHERE ticket=${ticket}`
     );
     await sendDiscordCryptoCloseAlert(
-      Number(row.ticket),
+      ticket,
       symbol,
       String(row.order_type || "BUY"),
       Number(row.lots || 0),
@@ -504,17 +565,47 @@ async function runFastCycle() {
 
     // Reconcile closed / open DB positions with live Binance ONLY when both endpoints returned HTTP 200
     if (credsPresent && binanceStatusCode === 200) {
+      const cfgLev = Math.max(1, Math.min(50, Math.round(Number(botRow.leverage || 5))));
+      if (lastSyncedConfigLev !== cfgLev) {
+        void syncLeverageAcrossCoins(cfgLev, String(botRow.active_pair || ""));
+      }
+
       const openDbSyms = (await db.execute(sql`SELECT DISTINCT UPPER(symbol) AS sym FROM trades WHERE status='OPEN'`)).rows as any[];
       const liveSet = new Set(positions.map((p) => p.symbol.toUpperCase()));
       for (const r of openDbSyms) {
-        if (!liveSet.has(r.sym)) {
-          await cancelAllOrders(r.sym);
-          await reconcileClosedSymbol(r.sym, 0, 0, "Server SL/TP Fill");
+        const symU = String(r.sym).toUpperCase();
+        if (liveSet.has(symU)) {
+          closeConfirmCount.delete(symU);
+          continue;
+        }
+        // Double-check directly per symbol & require 2 consecutive zero-qty checks before cancelling orders or closing DB row
+        const chk = await signedBinanceRequest("GET", "/fapi/v2/positionRisk", { symbol: symU });
+        const stillOpen =
+          chk.ok &&
+          Array.isArray(chk.data) &&
+          chk.data.some((px) => Math.abs(Number(px.positionAmt || 0)) > 0);
+        if (stillOpen) {
+          closeConfirmCount.delete(symU);
+          continue;
+        }
+        if (chk.ok) {
+          const misses = (closeConfirmCount.get(symU) || 0) + 1;
+          closeConfirmCount.set(symU, misses);
+          if (misses >= 2) {
+            closeConfirmCount.delete(symU);
+            await cancelAllOrders(symU);
+            await reconcileClosedSymbol(symU, 0, 0, "Server SL/TP Fill");
+          }
         }
       }
       for (const p of positions) {
+        const symU = p.symbol.toUpperCase();
+        closeConfirmCount.delete(symU);
+        if (p.leverage > 0 && p.leverage !== cfgLev) {
+          await ensureLeverage(symU, cfgLev, true);
+        }
         await db.execute(
-          sql`UPDATE trades SET close_price=${p.markPrice.toString()}, profit=${Number(p.unrealizedPnl.toFixed(2)).toString()} WHERE status='OPEN' AND UPPER(symbol)=${p.symbol.toUpperCase()}`
+          sql`UPDATE trades SET close_price=${p.markPrice.toString()}, profit=${Number(p.unrealizedPnl.toFixed(2)).toString()} WHERE status='OPEN' AND UPPER(symbol)=${symU}`
         );
       }
 
@@ -528,7 +619,11 @@ async function runFastCycle() {
         try {
           const dir = String(cmd.direction).toUpperCase();
           if (dir === "CLOSE") {
-            await closeSymbolPositions(String(cmd.symbol), positions, "Manual Close");
+            const cRes = await closeSymbolPositions(String(cmd.symbol), positions, "Manual Close");
+            if (cRes.error) {
+              status = "FAILED";
+              errMsg = cRes.error;
+            }
           } else if (dir === "BUY" || dir === "SELL") {
             const sym = await resolveLiveBinanceSymbol(String(cmd.symbol));
             const tRes = await fetch(`${getBaseUrl()}/fapi/v1/ticker/bookTicker?symbol=${sym}`, { signal: AbortSignal.timeout(5000) });
@@ -538,7 +633,7 @@ async function runFastCycle() {
             const tpFrac = Number(cmd.tp_pips || 2.4) / 100;
             const slP = dir === "BUY" ? entryP * (1 - slFrac) : entryP * (1 + slFrac);
             const tpP = dir === "BUY" ? entryP * (1 + tpFrac) : entryP * (1 - tpFrac);
-            const ex = await executeSingleFuturesOrder(sym, dir, Number(cmd.lots), entryP, slP, tpP, Number(botRow.leverage ?? 5), String(cmd.comment || "MANUAL_FUTURES"));
+            const ex = await executeSingleFuturesOrder(sym, dir, Number(cmd.lots), entryP, slP, tpP, cfgLev, String(cmd.comment || "MANUAL_FUTURES"));
             if (!ex.ok) {
               status = "FAILED";
               errMsg = ex.error || "Order rejected";
@@ -553,10 +648,19 @@ async function runFastCycle() {
         );
       }
 
-      // Guardian Shield + One-Time Fee-Aware Breakeven (ZERO Trailing Stop!)
+      // Guardian Shield + Exact Forex-Style Pure Risk-Free Breakeven Guard (ZERO Trailing Stop!)
+      // Matches Forex apply_pure_breakeven_guard():
+      //   1. Profit >= 0.35 * riskBudget (+$35 USD on $10k @ 1% risk, or peak reached that level)
+      //   2. OR open >= 60 mins & floating >= +$5 USD (scaled proportionally for smaller personal accounts)
+      //   Moves SL ONCE to Entry +/- 0.15% fee buffer while leaving structural Maker TP untouched.
       const accMode = String(botRow.account_mode || "PROP_FIRM").toUpperCase();
       const shieldPct = Number(botRow.guardian_shield_pct ?? 1.8);
       const riskEnabled = Boolean(botRow.risk_limits_enabled ?? true);
+      const riskPct = Number(botRow.risk_percent ?? 1.0);
+      const effRiskPct = accMode === "PROP_FIRM" ? Math.min(riskPct, 1.75) : riskPct;
+      const riskBudgetUsd = equity > 0 ? equity * (effRiskPct / 100) : 100;
+      const beTriggerUsd = accMode === "PROP_FIRM" ? Math.max(10.0, Number((riskBudgetUsd * 0.35).toFixed(2))) : Math.max(0.5, Number((riskBudgetUsd * 0.35).toFixed(2)));
+      const stagProfitMinUsd = accMode === "PROP_FIRM" ? Math.max(2.0, Number((riskBudgetUsd * 0.05).toFixed(2))) : Math.max(0.25, Number((riskBudgetUsd * 0.05).toFixed(2)));
 
       for (const p of positions) {
         const upnl = Number(p.unrealizedPnl || 0);
@@ -566,13 +670,19 @@ async function runFastCycle() {
           continue;
         }
         const meta = ((
-          await db.execute(sql`SELECT ticket, entry_time, entry_price, COALESCE(sl,0) AS sl, COALESCE(tp,0) AS tp FROM trades WHERE status='OPEN' AND UPPER(symbol)=${p.symbol.toUpperCase()} ORDER BY entry_time DESC LIMIT 1`)
+          await db.execute(
+            sql`SELECT ticket, (EXTRACT(EPOCH FROM (entry_time AT TIME ZONE 'UTC')) * 1000) AS entry_ms, entry_price, COALESCE(sl,0) AS sl, COALESCE(tp,0) AS tp
+                FROM trades WHERE status='OPEN' AND UPPER(symbol)=${p.symbol.toUpperCase()} ORDER BY entry_time DESC LIMIT 1`
+          )
         ).rows || [])[0] as any;
         if (!meta) continue;
         const ticket = Number(meta.ticket);
+        const peakFloat = Math.max(peakFloatingMap.get(ticket) ?? upnl, upnl);
+        peakFloatingMap.set(ticket, peakFloat);
         if (beLockedTickets.has(ticket)) continue;
-        const ageSec = meta.entry_time ? (Date.now() - new Date(meta.entry_time).getTime()) / 1000 : 999;
-        if (accMode === "PROP_FIRM" && ageSec < 140) continue;
+
+        const entryMs = Number(meta.entry_ms || 0);
+        const ageSec = entryMs > 0 ? Math.max(0, (Date.now() - entryMs) / 1000) : 0;
 
         const isLong = p.side === "BUY";
         const entryP = Number(meta.entry_price || p.entryPrice);
@@ -584,25 +694,39 @@ async function runFastCycle() {
           continue;
         }
 
-        const slDist = slP > 0 ? Math.abs(entryP - slP) : entryP * 0.01;
-        const favMove = isLong ? p.markPrice - entryP : entryP - p.markPrice;
-        const currR = slDist > 0 ? favMove / slDist : 0;
-        const notional = p.qty * entryP;
-        const stagBe = ageSec >= 3600 && notional > 0 && upnl / notional >= 0.0015;
+        const profitBeHit = Math.max(upnl, peakFloat) >= beTriggerUsd;
+        const stagBeHit = ageSec >= 3600 && upnl >= stagProfitMinUsd;
 
-        if (currR >= 1.0 || stagBe) {
+        if (profitBeHit || stagBeHit) {
           const filter = await getSymbolFilters(p.symbol);
           const beSl = quantizeTick(isLong ? entryP * 1.0015 : entryP * 0.9985, filter.tickSize);
-          await cancelAllOrders(p.symbol);
+          // Safety check: only move SL if markPrice is safely on winning side of beSl so STOP_MARKET doesn't reject -2021
+          const safeGap = isLong ? p.markPrice > beSl * 1.0004 : p.markPrice < beSl * 0.9996;
+          if (!safeGap) continue;
+
           const exitSide = isLong ? "SELL" : "BUY";
+          // Cancel ONLY existing SL conditional orders AFTER placing new BE SL, or replace SL/TP safely
           const okBe = await placeConditionalClose(p.symbol, exitSide, "STOP_MARKET", beSl);
-          if (tpP > 0) await placeLowFeeTpOrder(p.symbol, exitSide, quantizeTick(tpP, filter.tickSize), p.qty);
           if (okBe) {
+            // Cancel prior open algo orders except newest beSl if duplicates exist, then ensure TP active cleanly
+            const aoRes = await signedBinanceRequest("GET", "/fapi/v1/openAlgoOrders", { symbol: p.symbol });
+            if (aoRes.ok && Array.isArray(aoRes.data)) {
+              for (const ao of aoRes.data) {
+                const trg = Number(ao.triggerPrice || 0);
+                if (ao.orderType === "STOP_MARKET" && Math.abs(trg - beSl) > filter.tickSize * 0.5 && ao.algoId) {
+                  await signedBinanceRequest("DELETE", "/fapi/v1/algoOrder", { symbol: p.symbol, algoId: ao.algoId });
+                }
+              }
+            }
             beLockedTickets.add(ticket);
             await db.execute(sql`UPDATE trades SET sl=${beSl.toString()} WHERE ticket=${ticket}`);
+            const reasonStr = profitBeHit
+              ? `Profit +$${Math.max(upnl, peakFloat).toFixed(2)} >= +$${beTriggerUsd.toFixed(2)}`
+              : `60m Stagnation (${(ageSec / 60).toFixed(0)}m, +$${upnl.toFixed(2)})`;
             await postDiscordPayload(
-              `🛡️ **ONE-TIME FEE-SAFE BREAKEVEN LOCKED** · \`${p.symbol}\` (#${ticket})\n` +
-                `SL moved to \`$${formatCryptoPrice(beSl)}\` (+0.15% fee buffer) | Maker TP remains fixed at \`$${formatCryptoPrice(tpP)}\``
+              `🛡️ **PURE FOREX-STYLE BREAKEVEN LOCKED** · \`${p.symbol}\` (#${ticket})\n` +
+                `Trigger: \`${reasonStr}\`\n` +
+                `SL locked ONCE at \`$${formatCryptoPrice(beSl)}\` (+0.15% fee buffer — Zero Trailing) | TP untouched at \`$${formatCryptoPrice(tpP)}\``
             );
           }
         }
@@ -710,6 +834,17 @@ async function runSmcScanCycle() {
     const autoExec = Boolean(botRow.auto_execute ?? true);
     const isRunning = Boolean(botRow.is_bot_running ?? true);
 
+    const openTradeRows = (
+      await db.execute(sql`SELECT UPPER(symbol) AS sym, order_type, comment FROM trades WHERE status='OPEN'`)
+    ).rows as any[];
+    const openTradeMap = new Map<string, { side: string; isSmc: boolean }>();
+    for (const r of openTradeRows) {
+      openTradeMap.set(String(r.sym).toUpperCase(), {
+        side: String(r.order_type || "BUY").toUpperCase(),
+        isSmc: String(r.comment || "").toUpperCase().includes("SMC"),
+      });
+    }
+
     let bestCandidate: { sym: string; evalRes: ReturnType<typeof analyzeLiveSmcTelemetry> } | null = null;
     let bestScore = -1;
 
@@ -722,33 +857,65 @@ async function runSmcScanCycle() {
 
       const evalRes = analyzeLiveSmcTelemetry(sym, m5, m15, maxSlPct, leverage, 1.85);
       const t = evalRes.telemetry as any;
+      const openInfo = openTradeMap.get(sym.toUpperCase());
 
-      await db.execute(
-        sql`INSERT INTO smc_telemetry (
-              symbol, m15_bias, sweep_status, sweep_price, choch_status, choch_price,
-              fvg_status, fvg_bounds_json, retest_status, s6_status, s7_status, s8_status, s9_status, action, updated_at
-            ) VALUES (
-              ${sym}, ${t.m15_bias}, ${t.sweep_status}, ${Number(t.sweep_price || 0).toString()},
-              ${t.choch_status}, ${Number(t.choch_price || 0).toString()},
-              ${t.fvg_status}, ${t.fvg_bounds_json}, ${t.retest_status}, ${t.s6_status}, ${t.s7_status},
-              ${t.s8_status || ""}, ${t.s9_status || ""}, ${t.action}, NOW()
-            )
-            ON CONFLICT (symbol) DO UPDATE SET
-              m15_bias = EXCLUDED.m15_bias,
-              sweep_status = EXCLUDED.sweep_status,
-              sweep_price = EXCLUDED.sweep_price,
-              choch_status = EXCLUDED.choch_status,
-              choch_price = EXCLUDED.choch_price,
-              fvg_status = EXCLUDED.fvg_status,
-              fvg_bounds_json = EXCLUDED.fvg_bounds_json,
-              retest_status = EXCLUDED.retest_status,
-              s6_status = EXCLUDED.s6_status,
-              s7_status = EXCLUDED.s7_status,
-              s8_status = EXCLUDED.s8_status,
-              s9_status = EXCLUDED.s9_status,
-              action = EXCLUDED.action,
-              updated_at = NOW()`
-      );
+      if (openInfo?.isSmc) {
+        // Keep all 9/9 PASS step telemetry locked while an SMC trade is actively running on this coin; refresh live M5 candles only
+        await db.execute(
+          sql`INSERT INTO smc_telemetry (
+                symbol, m15_bias, sweep_status, sweep_price, choch_status, choch_price,
+                fvg_status, fvg_bounds_json, retest_status, s6_status, s7_status, s8_status, s9_status, action, updated_at
+              ) VALUES (
+                ${sym},
+                ${openInfo.side === "BUY" ? "BULLISH 🟢" : "BEARISH 🔴"},
+                'PASS 🟢 (Active Trade)', ${Number(t.sweep_price || 0).toString()},
+                'PASS 🟢 (Active Trade)', ${Number(t.choch_price || 0).toString()},
+                'PASS 🟢 (Active Trade)', ${t.fvg_bounds_json},
+                'PASS 🟢 (Active Trade)', 'PASS 🟢 (Active Trade)', 'PASS 🟢 (Active Trade)',
+                'PASS 🟢 (SL Protected)', 'PASS 🟢 (M15 Target Active)', ${openInfo.side}, NOW()
+              )
+              ON CONFLICT (symbol) DO UPDATE SET
+                m15_bias = ${openInfo.side === "BUY" ? "BULLISH 🟢" : "BEARISH 🔴"},
+                sweep_status = 'PASS 🟢 (Active Trade)',
+                choch_status = 'PASS 🟢 (Active Trade)',
+                fvg_status = 'PASS 🟢 (Active Trade)',
+                fvg_bounds_json = EXCLUDED.fvg_bounds_json,
+                retest_status = 'PASS 🟢 (Active Trade)',
+                s6_status = 'PASS 🟢 (Active Trade)',
+                s7_status = 'PASS 🟢 (Active Trade)',
+                s8_status = 'PASS 🟢 (SL Protected)',
+                s9_status = 'PASS 🟢 (M15 Target Active)',
+                action = ${openInfo.side},
+                updated_at = NOW()`
+        );
+      } else {
+        await db.execute(
+          sql`INSERT INTO smc_telemetry (
+                symbol, m15_bias, sweep_status, sweep_price, choch_status, choch_price,
+                fvg_status, fvg_bounds_json, retest_status, s6_status, s7_status, s8_status, s9_status, action, updated_at
+              ) VALUES (
+                ${sym}, ${t.m15_bias}, ${t.sweep_status}, ${Number(t.sweep_price || 0).toString()},
+                ${t.choch_status}, ${Number(t.choch_price || 0).toString()},
+                ${t.fvg_status}, ${t.fvg_bounds_json}, ${t.retest_status}, ${t.s6_status}, ${t.s7_status},
+                ${t.s8_status || ""}, ${t.s9_status || ""}, ${t.action}, NOW()
+              )
+              ON CONFLICT (symbol) DO UPDATE SET
+                m15_bias = EXCLUDED.m15_bias,
+                sweep_status = EXCLUDED.sweep_status,
+                sweep_price = EXCLUDED.sweep_price,
+                choch_status = EXCLUDED.choch_status,
+                choch_price = EXCLUDED.choch_price,
+                fvg_status = EXCLUDED.fvg_status,
+                fvg_bounds_json = EXCLUDED.fvg_bounds_json,
+                retest_status = EXCLUDED.retest_status,
+                s6_status = EXCLUDED.s6_status,
+                s7_status = EXCLUDED.s7_status,
+                s8_status = EXCLUDED.s8_status,
+                s9_status = EXCLUDED.s9_status,
+                action = EXCLUDED.action,
+                updated_at = NOW()`
+        );
+      }
 
       await db.execute(sql`DELETE FROM fvg_zones WHERE UPPER(symbol) = ${sym.toUpperCase()}`);
       for (const rz of evalRes.rawZones) {

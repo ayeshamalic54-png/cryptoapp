@@ -163,15 +163,16 @@ export function SmcChartOverlay({
 
   const isM15Bullish = rawM15Bias.includes("BULLISH");
   const isM15Bearish = rawM15Bias.includes("BEARISH");
-  const s1Pass = (isM15Bullish || isM15Bearish) && !rawM15Bias.includes("NEUTRAL");
-  const s2Pass = s1Pass && isPassText(sweepStatus);
-  const s3Pass = s2Pass && isPassText(chochStatus);
-  const s4Pass = s3Pass && isPassText(fvgStatus);
-  const s5Pass = s4Pass && isPassText(retestStatus);
-  const s6Pass = s5Pass && isPassText(s6Status);
-  const s7Pass = s6Pass && isPassText(s7Status);
-
   const hasActivePosition = Boolean(activePosition && (activePosition.ticket || activePosition.entry || activePosition.entryPrice));
+  const isActiveSmcTrade = hasActivePosition && String(activePosition?.comment ?? "SMC").toUpperCase().includes("SMC");
+
+  const s1Pass = isActiveSmcTrade || ((isM15Bullish || isM15Bearish) && !rawM15Bias.includes("NEUTRAL"));
+  const s2Pass = isActiveSmcTrade || (s1Pass && isPassText(sweepStatus));
+  const s3Pass = isActiveSmcTrade || (s2Pass && isPassText(chochStatus));
+  const s4Pass = isActiveSmcTrade || (s3Pass && isPassText(fvgStatus));
+  const s5Pass = isActiveSmcTrade || (s4Pass && isPassText(retestStatus));
+  const s6Pass = isActiveSmcTrade || (s5Pass && isPassText(s6Status));
+  const s7Pass = isActiveSmcTrade || (s6Pass && isPassText(s7Status));
   const s8Pass = isPassText(s8Status) || (hasActivePosition && s2Pass);
   const s9Pass = isPassText(s9Status) || (hasActivePosition && s7Pass);
   const isSignalFired = (action === "BUY" || action === "SELL") && s7Pass && s8Pass && s9Pass;
@@ -501,9 +502,12 @@ export function SmcChartOverlay({
   const chartLeft = isMobile ? 6 : 20;
   const rightTagWidth = isMobile ? 112 : 160;
   const chartRight = svgWidth - (rightTagWidth + 6);
+  const zoneDockWidth = isMobile ? 114 : 168;
+  // Reserve dedicated right margin lane between latest candle & price axis so FVG/iFVG/OB/BREAKER labels NEVER cover candlesticks
+  const candlesRight = Math.max(chartLeft + 140, chartRight - zoneDockWidth - 10);
   const chartTop = isMobile ? 16 : 25;
   const chartBottom = svgHeight - (isMobile ? 26 : 35);
-  const plotWidth = Math.max(100, chartRight - chartLeft);
+  const plotWidth = Math.max(100, candlesRight - chartLeft);
   const plotHeight = Math.max(100, chartBottom - chartTop);
 
   const showSlLevel = isTradeActive;
@@ -630,8 +634,9 @@ export function SmcChartOverlay({
     const isVisibleInPlot = (low: number, high: number) =>
       high >= minPrice - candleSpan * 0.15 && low <= maxPrice + candleSpan * 0.15;
 
-    const badgeW = isMobile ? 128 : 164;
+    const badgeW = Math.max(96, chartRight - candlesRight - 14);
     const badgeH = 18;
+    const zoneDockX = candlesRight + 10;
 
     if (fvgBounds && fvgBounds.high > fvgBounds.low && isVisibleInPlot(fvgBounds.low, fvgBounds.high)) {
       const originIdx = findOrigin(fvgBounds.low, fvgBounds.high, "FVG");
@@ -651,8 +656,8 @@ export function SmcChartOverlay({
         botY,
         centerY,
         boxHeight,
-        boxWidth: Math.max(candleSpacing * 2.5, chartRight - originX),
-        badgeX: Math.max(chartLeft + 6, chartRight - badgeW - 8),
+        boxWidth: Math.max(candleSpacing * 2, candlesRight + 4 - originX),
+        badgeX: zoneDockX,
         badgeY: centerY - badgeH / 2,
         badgeWidth: badgeW,
         badgeHeight: badgeH,
@@ -662,7 +667,7 @@ export function SmcChartOverlay({
         boxFill: "url(#fvgGradientZone)",
         boxStroke: s5Pass ? "#10b981" : isBullishSetup ? "#10b981" : "#f43f5e",
         strokeDash: s5Pass ? "none" : "4 4",
-        strokeWidth: s5Pass ? 2.0 : 1.4,
+        strokeWidth: s5Pass ? 1.8 : 1.1,
         badgeTitle: s5Pass ? "S5 FVG" : s4Pass ? "S4 FVG" : "FVG",
         badgeSub: `${fmtP(fvgBounds.low)}-${fmtP(fvgBounds.high)}`,
         isPrimaryFvg: true,
@@ -684,22 +689,22 @@ export function SmcChartOverlay({
       const boxHeight = Math.max(8, Math.abs(botY - topY));
       const centerY = Math.max(chartTop + badgeH / 2 + 4, Math.min(chartBottom - badgeH / 2 - 4, (topY + botY) / 2));
 
-      let boxFill = "rgba(6, 182, 212, 0.12)";
+      let boxFill = "rgba(6, 182, 212, 0.05)";
       let boxStroke = "#06b6d4";
       let badgeBg = "#083344";
       let strokeDash = "4 3";
       if (isOB) {
-        boxFill = z.isBullish ? "rgba(59, 130, 246, 0.14)" : "rgba(168, 85, 247, 0.14)";
+        boxFill = z.isBullish ? "rgba(59, 130, 246, 0.05)" : "rgba(168, 85, 247, 0.05)";
         boxStroke = z.isBullish ? "#3b82f6" : "#a855f7";
         badgeBg = z.isBullish ? "#172554" : "#3b0764";
         strokeDash = "none";
       } else if (isBreaker) {
-        boxFill = "rgba(245, 158, 11, 0.14)";
+        boxFill = "rgba(245, 158, 11, 0.05)";
         boxStroke = "#f59e0b";
         badgeBg = "#451a03";
         strokeDash = "5 3";
       } else if (isIFVG) {
-        boxFill = "rgba(34, 211, 238, 0.14)";
+        boxFill = "rgba(34, 211, 238, 0.05)";
         boxStroke = "#22d3ee";
         badgeBg = "#083344";
         strokeDash = "3 3";
@@ -716,8 +721,8 @@ export function SmcChartOverlay({
         botY,
         centerY,
         boxHeight,
-        boxWidth: Math.max(candleSpacing * 2.5, chartRight - originX),
-        badgeX: Math.max(chartLeft + 6, chartRight - badgeW - 8),
+        boxWidth: Math.max(candleSpacing * 2, candlesRight + 4 - originX),
+        badgeX: zoneDockX,
         badgeY: centerY - badgeH / 2,
         badgeWidth: badgeW,
         badgeHeight: badgeH,
@@ -727,7 +732,7 @@ export function SmcChartOverlay({
         boxFill,
         boxStroke,
         strokeDash,
-        strokeWidth: 1.4,
+        strokeWidth: 1.1,
         badgeTitle: shortName,
         badgeSub: `${fmtP(z.low)}-${fmtP(z.high)}`,
         isPrimaryFvg: false,
@@ -755,7 +760,7 @@ export function SmcChartOverlay({
       }
     }
     return rawList;
-  }, [candles, candleMilestones, fvgBounds, parsedActiveZones, chartLeft, chartRight, chartTop, chartBottom, candleSpacing, isMobile, isBullishSetup, s4Pass, s5Pass, dupTol, digits, minPrice, maxPrice, candleSpan]);
+  }, [candles, candleMilestones, fvgBounds, parsedActiveZones, chartLeft, chartRight, candlesRight, chartTop, chartBottom, candleSpacing, isMobile, isBullishSetup, s4Pass, s5Pass, dupTol, digits, minPrice, maxPrice, candleSpan]);
 
   const tagHeight = isMobile ? 16 : 18;
   const minTagGap = tagHeight + 2;
@@ -908,7 +913,7 @@ export function SmcChartOverlay({
     const x = ((e.clientX - rect.left) / rect.width) * svgWidth;
     const y = ((e.clientY - rect.top) / rect.height) * svgHeight;
     setMousePos({ x, y });
-    if (x >= chartLeft && x <= chartRight) {
+    if (x >= chartLeft && x <= candlesRight) {
       const idx = Math.floor((x - chartLeft) / candleSpacing);
       setHoveredCandle(candles[idx] ?? null);
     } else {
@@ -1125,11 +1130,13 @@ export function SmcChartOverlay({
             >
               <defs>
                 <linearGradient id="fvgGradientZone" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={isBullishSetup ? "#10b981" : "#f43f5e"} stopOpacity="0.28" />
-                  <stop offset="100%" stopColor={isBullishSetup ? "#10b981" : "#f43f5e"} stopOpacity="0.08" />
+                  <stop offset="0%" stopColor={isBullishSetup ? "#10b981" : "#f43f5e"} stopOpacity="0.08" />
+                  <stop offset="100%" stopColor={isBullishSetup ? "#10b981" : "#f43f5e"} stopOpacity="0.02" />
                 </linearGradient>
               </defs>
 
+              <rect x={candlesRight + 4} y={chartTop} width={Math.max(0, chartRight - candlesRight - 4)} height={plotHeight} fill="rgba(15, 23, 42, 0.25)" />
+              <line x1={candlesRight + 4} y1={chartTop} x2={candlesRight + 4} y2={chartBottom} stroke="#1e293b" strokeWidth="1" strokeDasharray="3 3" />
               <rect x={chartRight} y={chartTop} width={svgWidth - chartRight} height={plotHeight} fill="#080c16" />
               <line x1={chartRight} y1={chartTop} x2={chartRight} y2={chartBottom} stroke="#1e293b" strokeWidth="1.5" />
 
@@ -1274,10 +1281,10 @@ export function SmcChartOverlay({
                 );
               })}
 
-              {/* LAYER 3: De-overlapped Zone Pill Labels + Leader Connectors (rendered above candles & lines) */}
+              {/* LAYER 3: De-overlapped Zone Pill Labels in Dedicated Right Dock Lane (zero overlap on candles!) */}
               {renderedSmcZones.map((zone) => {
                 const badgeMidY = zone.badgeY + zone.badgeHeight / 2;
-                const leaderStartX = Math.max(zone.originX + 4, zone.badgeX - 18);
+                const leaderStartX = candlesRight + 2;
                 return (
                   <g key={`lbl-${zone.id}`} pointerEvents="none">
                     {Math.abs(badgeMidY - zone.centerY) > 2 && (
