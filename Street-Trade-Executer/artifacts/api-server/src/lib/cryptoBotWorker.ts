@@ -194,8 +194,8 @@ async function getAccountSnapshot(): Promise<{
     signedBinanceRequest("GET", "/fapi/v2/account"),
     signedBinanceRequest("GET", "/fapi/v2/positionRisk"),
   ]);
-  if (!accRes.ok) {
-    return { equity: 0, avail: 0, positions: [], statusCode: accRes.status };
+  if (!accRes.ok || !posRes.ok || !Array.isArray(posRes.data)) {
+    return { equity: 0, avail: 0, positions: [], statusCode: !accRes.ok ? accRes.status : posRes.status || 502 };
   }
   const wallet = Number(accRes.data?.totalWalletBalance ?? 0);
   const unreal = Number(accRes.data?.totalUnrealizedProfit ?? 0);
@@ -502,8 +502,8 @@ async function runFastCycle() {
     const binanceBlocked451 = binanceStatusCode === 451;
     const binanceAuthErr = credsPresent && binanceStatusCode !== 200 && !binanceBlocked451;
 
-    // Reconcile closed / open DB positions with live Binance
-    if (credsPresent && !binanceBlocked451) {
+    // Reconcile closed / open DB positions with live Binance ONLY when both endpoints returned HTTP 200
+    if (credsPresent && binanceStatusCode === 200) {
       const openDbSyms = (await db.execute(sql`SELECT DISTINCT UPPER(symbol) AS sym FROM trades WHERE status='OPEN'`)).rows as any[];
       const liveSet = new Set(positions.map((p) => p.symbol.toUpperCase()));
       for (const r of openDbSyms) {
