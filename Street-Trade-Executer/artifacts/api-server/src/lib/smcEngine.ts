@@ -721,12 +721,16 @@ export function analyzeLiveSmcTelemetry(
             const slDist = Math.abs(livePrice - slPrice);
             const slPct = livePrice > 0 ? (slDist / livePrice) * 100 : 99;
             const liqSafe = Math.min(maxSlPct, 60 / Math.max(1, leverage));
-            if (slDist > 0 && slPct <= liqSafe) {
+            // Fee-safe minimum structural stop (>= 0.35%) so Binance commissions never eat profit edge
+            if (slDist > 0 && slPct >= 0.35 && slPct <= liqSafe) {
               s8Ok = true;
               const targ = computeM15OpposingTarget(isBull, m15Bars, livePrice, slDist, minTargetRrr, scale);
               tpPrice = targ.tpPrice;
               rrr = targ.rrr;
-              if (rrr >= minTargetRrr) {
+              const tpDist = Math.abs(tpPrice - livePrice);
+              const feeEst = livePrice * 0.0007; // 0.05% taker entry + 0.02% maker TP
+              const netRrr = (tpDist - feeEst) / (slDist + feeEst);
+              if (rrr >= minTargetRrr && netRrr >= 1.75) {
                 s9Ok = true;
                 action = isBull ? "BUY" : "SELL";
               }
@@ -883,7 +887,8 @@ function sizeSimCryptoPosition(
 ): { qty: number; marginUsed: number; marginPct: number } {
   const slDist = Math.abs(entryPrice - slPrice);
   if (entryPrice <= 0 || slDist <= 0 || balance <= 0) return { qty: 0, marginUsed: 0, marginPct: 0 };
-  const capMarginPct = Math.min(80, Math.max(5, maxMarginPct));
+  const capMarginPct =
+    accountMode === "PERSONAL" ? Math.min(98.5, Math.max(5, maxMarginPct)) : Math.min(80, Math.max(5, maxMarginPct));
   const effRiskPct = accountMode === "PROP_FIRM" ? Math.min(riskPercent, 1.75) : riskPercent;
   const riskUsd = balance * (effRiskPct / 100);
   const rawQtyRisk = riskUsd / slDist;
@@ -1183,7 +1188,7 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
     symbol: binSym,
     accountMode,
     leverage,
-    maxMarginPct: Math.min(80, maxMarginPct),
+    maxMarginPct: accountMode === "PERSONAL" ? Math.min(100, maxMarginPct) : Math.min(80, maxMarginPct),
     totalTrades: trades.length,
     wins,
     losses,

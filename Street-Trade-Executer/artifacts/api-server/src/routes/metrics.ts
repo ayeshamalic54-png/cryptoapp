@@ -112,6 +112,10 @@ router.post("/metrics/reset", async (req, res) => {
     const upd = await db.execute(sql`
       UPDATE bot_state
       SET metrics_reset_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
+          initial_balance = CASE WHEN COALESCE(equity, 0) > 0 THEN equity ELSE initial_balance END,
+          max_equity_peak = CASE WHEN COALESCE(equity, 0) > 0 THEN equity ELSE max_equity_peak END,
+          drawdown_percent = 0.00,
+          overall_drawdown = 0.00,
           updated_at = NOW()
       WHERE id = (SELECT MIN(id) FROM bot_state)
       RETURNING metrics_reset_at

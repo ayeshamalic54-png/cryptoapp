@@ -257,7 +257,7 @@ export default function Dashboard() {
             {accountMode === "PERSONAL" ? `PERSONAL FUND (${leverage}x · ${riskPercent}% Risk)` : `PROP FIRM · BLUE GUARDIAN (${leverage}x)`}
           </Badge>
           <Badge variant="outline" className="font-mono text-[10px] bg-emerald-500/10 text-emerald-300 border-emerald-500/30">
-            CAP: ≤ {Math.min(80, maxMarginPct)}% MARGIN
+            CAP: ≤ {accountMode === "PERSONAL" ? Math.min(100, maxMarginPct) : Math.min(80, maxMarginPct)}% MARGIN
           </Badge>
         </div>
 

@@ -29,7 +29,7 @@ const configSchema = z.object({
   accountMode: z.enum(["PROP_FIRM", "PERSONAL"]),
   leverage: z.coerce.number().min(1).max(50),
   riskPercent: z.coerce.number().min(0.1).max(15),
-  maxMarginPct: z.coerce.number().min(10).max(80),
+  maxMarginPct: z.coerce.number().min(10).max(100),
   maxSlPct: z.coerce.number().min(0.2).max(10),
   haltDrawdownLimit: z.coerce.number().min(0.5).max(15),
   maxDrawdownLimit: z.coerce.number().min(1).max(20),
@@ -47,7 +47,7 @@ const BLUE_GUARDIAN_CRYPTO_RULES = [
   { rule: "Max Overall Drawdown", value: "8% Static Eval / 6% Trailing Instant", botValue: "Bot Static Guard Halts @ 7.2%", safe: true },
   { rule: "Guardian Shield Floating", value: "2% Eval / 1% Instant single-trade cut", botValue: "Bot Risk/Shield Capped <= 1.8% Floating", safe: true },
   { rule: "Minimum Hold Duration", value: ">= 120 Seconds (2-Min Proscribed HFT Rule)", botValue: "Bot Enforces 140s Min Hold on Discretionary Exits", safe: true },
-  { rule: "Capital Margin Cap", value: "Strict Prop / Personal Margin Protection", botValue: "Hard Cap <= 80% Equity Margin Always", safe: true },
+  { rule: "Capital Margin Cap", value: "Prop Firm <= 80% / Personal Full Capital", botValue: "Prop <= 80% Cap | Personal up to 100%", safe: true },
   { rule: "Weekend Crypto Holding", value: "Allowed 24/7 on Crypto Perpetuals", botValue: "Supported 24/7 (Optional PKT Session Guard)", safe: true },
   { rule: "EA / Automated Bot", value: "Pure Non-Martingale / Non-Grid Single Order", botValue: "Pure 9-Step SMC Single Order + One-Time BE", safe: true },
 ];
@@ -88,7 +88,10 @@ export default function Config() {
           accountMode: (config.accountMode === "PERSONAL" ? "PERSONAL" : "PROP_FIRM") as "PROP_FIRM" | "PERSONAL",
           leverage: Number(config.leverage ?? 5),
           riskPercent: Number(config.riskPercent ?? 1.0),
-          maxMarginPct: Math.min(80, Number(config.maxMarginPct ?? 80)),
+          maxMarginPct:
+            config.accountMode === "PERSONAL"
+              ? Math.min(100, Number(config.maxMarginPct ?? 100))
+              : Math.min(80, Number(config.maxMarginPct ?? 80)),
           maxSlPct: Number(config.maxSlPct ?? config.slPips ?? 1.2),
           haltDrawdownLimit: Number(config.haltDrawdownLimit ?? 3.5),
           maxDrawdownLimit: Number(config.maxDrawdownLimit ?? 4.0),
@@ -117,7 +120,7 @@ export default function Config() {
     form.setValue("initialBalance", bal, { shouldDirty: true });
     form.setValue("riskPercent", riskPct, { shouldDirty: true });
     form.setValue("leverage", lev, { shouldDirty: true });
-    form.setValue("maxMarginPct", 80, { shouldDirty: true });
+    form.setValue("maxMarginPct", mode === "PERSONAL" ? 100 : 80, { shouldDirty: true });
     form.setValue("haltDrawdownLimit", haltDd, { shouldDirty: true });
     form.setValue("maxDrawdownLimit", maxDd, { shouldDirty: true });
     form.setValue("guardianShieldPct", mode === "PROP_FIRM" ? 1.8 : 5.0, { shouldDirty: true });
@@ -236,7 +239,7 @@ export default function Config() {
       <div>
         <h2 className="text-2xl font-bold tracking-tight">Crypto Futures Configuration</h2>
         <p className="text-sm text-muted-foreground">
-          Pure 9-Condition SMC · Dual Mode (Blue Guardian Prop vs Personal $50/$100/$300 USDT) · ≤ 80% Margin Cap
+          Pure 9-Condition SMC · Dual Mode (Prop Firm ≤ 80% Cap vs Personal up to 100% Full Capital) · Low-Fee Maker TP (0.02%)
         </p>
       </div>
 
@@ -250,7 +253,7 @@ export default function Config() {
                   <Shield className="w-4 h-4 text-indigo-400" /> Account &amp; Capital Mode (Separate Prop vs Personal)
                 </CardTitle>
                 <CardDescription className="text-xs">
-                  Choose Blue Guardian Prop Firm rules OR Personal Binance Futures ($50 / $100 / $300 USDT). Both strictly enforce ≤ 80% max capital margin.
+                  Choose Blue Guardian Prop Firm (strict ≤ 80% max margin) OR Personal Binance Futures (uses up to 100% full capital + 0.02% Maker TP fee-saver).
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -276,7 +279,7 @@ export default function Config() {
 
                   <button
                     type="button"
-                    onClick={() => applyModePreset("PERSONAL", 100, 3.0, 5, 8.0, 10.0, "Personal Binance ($100 USDT)")}
+                    onClick={() => applyModePreset("PERSONAL", 100, 5.0, 5, 10.0, 15.0, "Personal Binance ($100 USDT)")}
                     className={cn(
                       "p-4 rounded-lg border text-left transition-all space-y-1.5",
                       activeMode === "PERSONAL"
@@ -289,7 +292,7 @@ export default function Config() {
                       {activeMode === "PERSONAL" && <Badge className="bg-emerald-600 text-white text-[10px]">SELECTED</Badge>}
                     </div>
                     <p className="text-xs text-zinc-400 font-mono">
-                      Self-Funded ($50 / $100 / $300+ USDT) · Custom Risk &amp; Leverage · MIN_NOTIONAL Safe · ≤80% Max Margin
+                      Self-Funded ($50 / $100 / $300+ USDT) · Up to 100% Full Capital · Maker TP Low-Fee
                     </p>
                   </button>
                 </div>
@@ -368,9 +371,19 @@ export default function Config() {
                         <FormItem>
                           <FormLabel className="text-xs font-mono uppercase text-zinc-400">Max Margin Cap (%)</FormLabel>
                           <FormControl>
-                            <Input type="number" min="10" max="80" {...field} className="font-mono bg-zinc-950" />
+                            <Input
+                              type="number"
+                              min="10"
+                              max={activeMode === "PERSONAL" ? 100 : 80}
+                              {...field}
+                              className="font-mono bg-zinc-950"
+                            />
                           </FormControl>
-                          <FormDescription className="text-[10px]">Strictly capped ≤ 80%</FormDescription>
+                          <FormDescription className="text-[10px]">
+                            {activeMode === "PERSONAL"
+                              ? "Personal Mode: up to 100% full capital (1.5% fee buffer)"
+                              : "Prop Firm Mode: strictly capped ≤ 80%"}
+                          </FormDescription>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -521,7 +534,7 @@ export default function Config() {
             <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30 text-xs">COMPLIANT</Badge>
           </div>
           <CardDescription className="text-xs">
-            Built directly around Blue Guardian Futures/Crypto evaluation &amp; instant rules (ignored when switched to Personal Mode except 80% margin cap).
+            Enforced strictly in Blue Guardian Prop Firm mode (≤ 80% max margin); Personal Mode unlocks up to 100% full capital + Maker TP low-fee sizing.
           </CardDescription>
         </CardHeader>
         <CardContent>

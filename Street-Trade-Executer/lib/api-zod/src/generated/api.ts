@@ -206,7 +206,7 @@ export const UpdateConfigBody = zod.object({
   "accountMode": zod.enum(["PROP_FIRM", "PERSONAL"]).optional(),
   "leverage": zod.coerce.number().min(1).max(50).optional(),
   "riskPercent": zod.coerce.number().min(0.1).max(20).optional(),
-  "maxMarginPct": zod.coerce.number().min(5).max(80).optional(),
+  "maxMarginPct": zod.coerce.number().min(5).max(100).optional(),
   "maxSlPct": zod.coerce.number().min(0.2).max(10).optional(),
   "haltDrawdownLimit": zod.coerce.number().min(0.5).max(15).optional(),
   "maxDrawdownLimit": zod.coerce.number().min(1).max(20).optional(),

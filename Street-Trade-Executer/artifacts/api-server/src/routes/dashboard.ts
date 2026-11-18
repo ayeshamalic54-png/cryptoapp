@@ -148,7 +148,10 @@ router.get("/dashboard", async (req, res) => {
       accountMode: String(botState?.accountMode ?? "PROP_FIRM"),
       leverage: Number(botState?.leverage ?? 5),
       riskPercent: Number(botState?.riskPercent ?? 1.0),
-      maxMarginPct: Math.min(80, Number(botState?.maxMarginPct ?? 80)),
+      maxMarginPct:
+        String(botState?.accountMode ?? "PROP_FIRM").toUpperCase() === "PERSONAL"
+          ? Math.min(100, Number(botState?.maxMarginPct ?? 100))
+          : Math.min(80, Number(botState?.maxMarginPct ?? 80)),
       maxSlPct: Number(botState?.maxSlPct ?? 1.2),
       haltDrawdownLimit: Number(botState?.haltDrawdownLimit ?? 3.5),
       maxDrawdownLimit: Number(botState?.maxDrawdownLimit ?? 4.0),

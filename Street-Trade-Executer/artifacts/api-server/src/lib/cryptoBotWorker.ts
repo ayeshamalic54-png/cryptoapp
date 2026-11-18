@@ -236,9 +236,13 @@ function calculateFuturesQty(
   maxMarginPct: number,
   accountMode: string
 ): { qty: number; marginPct: number; marginUsed: number; riskUsdt: number; error?: string } {
-  const capMarginPct = Math.min(80, Math.max(5, maxMarginPct || 80));
+  const isPersonal = accountMode.toUpperCase() === "PERSONAL";
+  // Prop Firm strictly <= 80%; Personal uses up to 100% (reserving 1.5% cushion only for Binance open/close fees so -2019 never triggers)
+  const capMarginPct = isPersonal
+    ? Math.min(98.5, Math.max(5, maxMarginPct || 100))
+    : Math.min(80, Math.max(5, maxMarginPct || 80));
   const effLev = Math.max(1, Math.min(50, leverage || 5));
-  const effRiskPct = accountMode === "PROP_FIRM" ? Math.min(riskPct, 1.75) : riskPct;
+  const effRiskPct = !isPersonal ? Math.min(riskPct, 1.75) : riskPct;
   const slDist = Math.abs(entryPrice - slPrice);
   if (entryPrice <= 0 || slDist <= 0 || equity <= 0) {
     return { qty: 0, marginPct: 0, marginUsed: 0, riskUsdt: 0, error: "Invalid entry/SL/equity" };
@@ -256,7 +260,7 @@ function calculateFuturesQty(
     const bumpQty = quantizeStep(reqNotional / entryPrice, filter.stepSize, true);
     const bumpNotional = bumpQty * entryPrice;
     const bumpRiskPct = ((bumpQty * slDist) / equity) * 100;
-    const maxSafeBumpRisk = accountMode === "PROP_FIRM" ? 1.9 : 8.0;
+    const maxSafeBumpRisk = !isPersonal ? 1.9 : 15.0;
     if (bumpNotional <= maxNotional && bumpRiskPct <= maxSafeBumpRisk) {
       qty = bumpQty;
       notional = bumpNotional;
@@ -311,6 +315,24 @@ async function placeConditionalClose(symbol: string, exitSide: "BUY" | "SELL", t
   return fb.ok;
 }
 
+/**
+ * Places a reduceOnly LIMIT Take Profit order (0.02% Maker fee vs 0.05% Taker fee — saves 60% exit fee),
+ * falling back to TAKE_PROFIT_MARKET only if the exchange rejects immediate limit placement.
+ */
+async function placeLowFeeTpOrder(symbol: string, exitSide: "BUY" | "SELL", tpPrice: number, qty: number) {
+  const lim = await signedBinanceRequest("POST", "/fapi/v1/order", {
+    symbol,
+    side: exitSide,
+    type: "LIMIT",
+    timeInForce: "GTC",
+    quantity: String(qty),
+    price: String(tpPrice),
+    reduceOnly: "true",
+  });
+  if (lim.ok) return true;
+  return placeConditionalClose(symbol, exitSide, "TAKE_PROFIT_MARKET", tpPrice);
+}
+
 async function executeSingleFuturesOrder(
   symbol: string,
   side: "BUY" | "SELL",
@@ -354,7 +376,7 @@ async function executeSingleFuturesOrder(
   await cancelAllOrders(binSym);
   const exitSide = side === "BUY" ? "SELL" : "BUY";
   await placeConditionalClose(binSym, exitSide, "STOP_MARKET", slRound);
-  await placeConditionalClose(binSym, exitSide, "TAKE_PROFIT_MARKET", tpRound);
+  await placeLowFeeTpOrder(binSym, exitSide, tpRound, execQty);
 
   await db.execute(
     sql`INSERT INTO trades (ticket, symbol, order_type, lots, entry_price, sl, tp, entry_time, status, comment, signal_id, mt5_login)
@@ -570,17 +592,17 @@ async function runFastCycle() {
 
         if (currR >= 1.0 || stagBe) {
           const filter = await getSymbolFilters(p.symbol);
-          const beSl = quantizeTick(isLong ? entryP * 1.0012 : entryP * 0.9988, filter.tickSize);
+          const beSl = quantizeTick(isLong ? entryP * 1.0015 : entryP * 0.9985, filter.tickSize);
           await cancelAllOrders(p.symbol);
           const exitSide = isLong ? "SELL" : "BUY";
           const okBe = await placeConditionalClose(p.symbol, exitSide, "STOP_MARKET", beSl);
-          if (tpP > 0) await placeConditionalClose(p.symbol, exitSide, "TAKE_PROFIT_MARKET", quantizeTick(tpP, filter.tickSize));
+          if (tpP > 0) await placeLowFeeTpOrder(p.symbol, exitSide, quantizeTick(tpP, filter.tickSize), p.qty);
           if (okBe) {
             beLockedTickets.add(ticket);
             await db.execute(sql`UPDATE trades SET sl=${beSl.toString()} WHERE ticket=${ticket}`);
             await postDiscordPayload(
               `🛡️ **ONE-TIME FEE-SAFE BREAKEVEN LOCKED** · \`${p.symbol}\` (#${ticket})\n` +
-                `SL moved to \`$${formatCryptoPrice(beSl)}\` (+0.12% fee buffer) | TP remains fixed at \`$${formatCryptoPrice(tpP)}\``
+                `SL moved to \`$${formatCryptoPrice(beSl)}\` (+0.15% fee buffer) | Maker TP remains fixed at \`$${formatCryptoPrice(tpP)}\``
             );
           }
         }
@@ -680,8 +702,11 @@ async function runSmcScanCycle() {
     const maxSlPct = Number(botRow.max_sl_pct ?? 1.2);
     const leverage = Number(botRow.leverage ?? 5);
     const riskPct = Number(botRow.risk_percent ?? 1.0);
-    const maxMarginPct = Math.min(80, Number(botRow.max_margin_pct ?? 80));
     const accountMode = String(botRow.account_mode || "PROP_FIRM").toUpperCase();
+    const maxMarginPct =
+      accountMode === "PERSONAL"
+        ? Math.min(100, Number(botRow.max_margin_pct ?? 100))
+        : Math.min(80, Number(botRow.max_margin_pct ?? 80));
     const autoExec = Boolean(botRow.auto_execute ?? true);
     const isRunning = Boolean(botRow.is_bot_running ?? true);
 

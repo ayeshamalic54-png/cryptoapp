@@ -77,10 +77,12 @@ export default function Backtest() {
       setInitialBalance("10000");
       setRiskPercent("1.0");
       setLeverage("5");
+      setMaxMarginPct("80");
     } else {
       setInitialBalance(bal || "100");
       setRiskPercent(bal === "300" ? "2.0" : "3.0");
       setLeverage("5");
+      setMaxMarginPct("100");
     }
   };
 
@@ -96,7 +98,7 @@ export default function Backtest() {
           initialBalance: parseFloat(initialBalance) || 10000,
           leverage: parseInt(leverage, 10) || 5,
           riskPercent: parseFloat(riskPercent) || 1.0,
-          maxMarginPct: Math.min(80, parseFloat(maxMarginPct) || 80),
+          maxMarginPct: Math.min(accountMode === "PERSONAL" ? 100 : 80, parseFloat(maxMarginPct) || (accountMode === "PERSONAL" ? 100 : 80)),
           maxSlPct: parseFloat(maxSlPct) || 1.2,
           minRrr: parseFloat(minRrr) || 1.85,
           days: parseInt(days, 10) || 14,

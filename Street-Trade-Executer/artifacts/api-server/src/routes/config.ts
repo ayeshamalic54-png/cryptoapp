@@ -45,7 +45,10 @@ function serializeConfig(state: any) {
     accountMode: accMode,
     leverage: Number(state?.leverage ?? 5),
     riskPercent: Number(state?.riskPercent ?? (accMode === "PROP_FIRM" ? 1.0 : 2.5)),
-    maxMarginPct: Math.min(80, Number(state?.maxMarginPct ?? 80.0)),
+    maxMarginPct:
+      accMode === "PERSONAL"
+        ? Math.min(100, Number(state?.maxMarginPct ?? 100.0))
+        : Math.min(80, Number(state?.maxMarginPct ?? 80.0)),
     maxSlPct: Number(state?.maxSlPct ?? 1.2),
     haltDrawdownLimit: Number(state?.haltDrawdownLimit ?? 3.5),
     maxDrawdownLimit: Number(state?.maxDrawdownLimit ?? 4.0),
@@ -84,8 +87,10 @@ router.post("/config", async (req, res) => {
     const accMode = (d.accountMode ?? (currRow?.accountMode as "PROP_FIRM" | "PERSONAL") ?? "PROP_FIRM").toUpperCase();
     const leverage = Math.max(1, Math.min(50, Math.round(Number(d.leverage ?? currRow?.leverage ?? 5))));
     const riskPercent = Math.max(0.1, Math.min(20, Number(d.riskPercent ?? currRow?.riskPercent ?? (accMode === "PROP_FIRM" ? 1.0 : 2.5))));
-    // Strict <= 80% max margin cap enforced server-side
-    const maxMarginPct = Math.max(5, Math.min(80, Number(d.maxMarginPct ?? currRow?.maxMarginPct ?? 80)));
+    // Prop Firm strictly <= 80% max margin cap; Personal Futures allows up to 100% full capital usage
+    const capMax = accMode === "PERSONAL" ? 100 : 80;
+    const defaultMarginCap = accMode === "PERSONAL" ? 100 : 80;
+    const maxMarginPct = Math.max(5, Math.min(capMax, Number(d.maxMarginPct ?? currRow?.maxMarginPct ?? defaultMarginCap)));
     const maxSlPct = Math.max(0.2, Math.min(10, Number(d.maxSlPct ?? d.slPips ?? currRow?.maxSlPct ?? 1.2)));
     const haltDD = Math.max(0.5, Math.min(15, Number(d.haltDrawdownLimit ?? currRow?.haltDrawdownLimit ?? 3.5)));
     const maxDD = Math.max(1.0, Math.min(20, Number(d.maxDrawdownLimit ?? currRow?.maxDrawdownLimit ?? 4.0)));
@@ -258,10 +263,11 @@ router.post("/discord/test", async (req, res) => {
 
     const state = (await db.select().from(botStateTable).limit(1))[0] as any;
     const sym = resolveBinanceSymbol(String(req.body?.symbol || state?.activePair || "BTCUSDT"));
+    const accMode = String(state?.accountMode ?? "PROP_FIRM").toUpperCase();
     const leverage = Math.max(1, Number(state?.leverage ?? 5) || 5);
     const riskPct = Math.max(0.1, Number(state?.riskPercent ?? 1.0) || 1.0);
-    const maxMarginPct = Math.min(80, Math.max(10, Number(state?.maxMarginPct ?? 80) || 80));
-    const accMode = String(state?.accountMode ?? "PROP_FIRM").toUpperCase();
+    const capMax = accMode === "PERSONAL" ? 100 : 80;
+    const maxMarginPct = Math.min(capMax, Math.max(10, Number(state?.maxMarginPct ?? capMax) || capMax));
     const equity = Math.max(50, Number(state?.equity ?? state?.initialBalance ?? 10000) || 10000);
 
     const klines = await fetchBinanceKlines(sym, "5m", 5);

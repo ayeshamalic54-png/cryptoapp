@@ -172,11 +172,10 @@ export function SmcChartOverlay({
   const s7Pass = s6Pass && isPassText(s7Status);
 
   const hasActivePosition = Boolean(activePosition && (activePosition.ticket || activePosition.entry || activePosition.entryPrice));
-  const isSignalFired = (action === "BUY" || action === "SELL") && s7Pass;
+  const s8Pass = isPassText(s8Status) || (hasActivePosition && s2Pass);
+  const s9Pass = isPassText(s9Status) || (hasActivePosition && s7Pass);
+  const isSignalFired = (action === "BUY" || action === "SELL") && s7Pass && s8Pass && s9Pass;
   const isTradeActive = hasActivePosition || isSignalFired;
-
-  const s8Pass = isPassText(s8Status) || (s2Pass && isTradeActive);
-  const s9Pass = isPassText(s9Status) || (s7Pass && isTradeActive);
 
   const passedCount = [s1Pass, s2Pass, s3Pass, s4Pass, s5Pass, s6Pass, s7Pass, s8Pass, s9Pass].filter(Boolean).length;
 
@@ -507,9 +506,9 @@ export function SmcChartOverlay({
   const plotWidth = Math.max(100, chartRight - chartLeft);
   const plotHeight = Math.max(100, chartBottom - chartTop);
 
-  const showSlLevel = isTradeActive || s2Pass;
-  const showTpLevel = isTradeActive || s4Pass;
-  const showEntryLevel = isTradeActive || s7Pass;
+  const showSlLevel = isTradeActive;
+  const showTpLevel = isTradeActive;
+  const showEntryLevel = isTradeActive;
 
   const candleMin =
     candles.length > 0 ? Math.min(...candles.map((c) => c.low), ...(livePrice > 0 ? [livePrice] : [])) : 0;
@@ -520,21 +519,23 @@ export function SmcChartOverlay({
 
   const minPrice = useMemo(() => {
     let min = candleMin - vertPad;
-    const pad = candleSpan * 0.06;
-    if (showSlLevel && effectiveSlPrice > 0 && candleMin - effectiveSlPrice <= candleSpan * 1.5) min = Math.min(min, effectiveSlPrice - pad);
-    if (showTpLevel && effectiveTpPrice > 0 && candleMin - effectiveTpPrice <= candleSpan * 1.5) min = Math.min(min, effectiveTpPrice - pad);
+    const pad = candleSpan * 0.08;
+    if (isTradeActive && effectiveEntryPrice > 0) min = Math.min(min, effectiveEntryPrice - pad);
+    if (showSlLevel && effectiveSlPrice > 0 && candleMin - effectiveSlPrice <= candleSpan * 4.0) min = Math.min(min, effectiveSlPrice - pad);
+    if (showTpLevel && effectiveTpPrice > 0 && candleMin - effectiveTpPrice <= candleSpan * 4.0) min = Math.min(min, effectiveTpPrice - pad);
     if (swingStructure.swingLow > 0 && candleMin - swingStructure.swingLow <= candleSpan * 1.3) min = Math.min(min, swingStructure.swingLow - pad);
     return min;
-  }, [candleMin, vertPad, candleSpan, showSlLevel, effectiveSlPrice, showTpLevel, effectiveTpPrice, swingStructure.swingLow]);
+  }, [candleMin, vertPad, candleSpan, isTradeActive, effectiveEntryPrice, showSlLevel, effectiveSlPrice, showTpLevel, effectiveTpPrice, swingStructure.swingLow]);
 
   const maxPrice = useMemo(() => {
     let max = candleMax + vertPad;
-    const pad = candleSpan * 0.06;
-    if (showTpLevel && effectiveTpPrice > 0 && effectiveTpPrice - candleMax <= candleSpan * 1.5) max = Math.max(max, effectiveTpPrice + pad);
-    if (showSlLevel && effectiveSlPrice > 0 && effectiveSlPrice - candleMax <= candleSpan * 1.5) max = Math.max(max, effectiveSlPrice + pad);
+    const pad = candleSpan * 0.08;
+    if (isTradeActive && effectiveEntryPrice > 0) max = Math.max(max, effectiveEntryPrice + pad);
+    if (showTpLevel && effectiveTpPrice > 0 && effectiveTpPrice - candleMax <= candleSpan * 4.0) max = Math.max(max, effectiveTpPrice + pad);
+    if (showSlLevel && effectiveSlPrice > 0 && effectiveSlPrice - candleMax <= candleSpan * 4.0) max = Math.max(max, effectiveSlPrice + pad);
     if (swingStructure.swingHigh > 0 && swingStructure.swingHigh - candleMax <= candleSpan * 1.3) max = Math.max(max, swingStructure.swingHigh + pad);
     return max;
-  }, [candleMax, vertPad, candleSpan, showTpLevel, effectiveTpPrice, showSlLevel, effectiveSlPrice, swingStructure.swingHigh]);
+  }, [candleMax, vertPad, candleSpan, isTradeActive, effectiveEntryPrice, showTpLevel, effectiveTpPrice, showSlLevel, effectiveSlPrice, swingStructure.swingHigh]);
 
   const priceRange = Math.max(scaleRef * 1e-6, maxPrice - minPrice);
 
@@ -992,12 +993,23 @@ export function SmcChartOverlay({
               CHoCH: ${fmtP(chochPrice)}
             </div>
           )}
-          <div className={cn("px-3 py-1 rounded font-black text-xs font-mono border", s8Pass || isTradeActive ? "bg-rose-950 border-rose-500 text-rose-200" : "bg-zinc-900/60 border-zinc-800 text-zinc-500")}>
-            SL: ${fmtP(slPrice)}
-          </div>
-          <div className={cn("px-3 py-1 rounded font-black text-xs font-mono border", s9Pass || isTradeActive ? "bg-emerald-950 border-emerald-500 text-emerald-200" : "bg-zinc-900/60 border-zinc-800 text-zinc-500")}>
-            TP: ${fmtP(tpPrice)} ({effectiveRrr}R)
-          </div>
+          {isTradeActive ? (
+            <>
+              <div className="px-3 py-1 rounded font-black text-xs font-mono border bg-sky-950 border-sky-400 text-sky-200">
+                Entry: ${fmtP(entryPrice)}
+              </div>
+              <div className="px-3 py-1 rounded font-black text-xs font-mono border bg-rose-950 border-rose-500 text-rose-200">
+                SL: ${fmtP(slPrice)}
+              </div>
+              <div className="px-3 py-1 rounded font-black text-xs font-mono border bg-emerald-950 border-emerald-500 text-emerald-200">
+                TP: ${fmtP(tpPrice)} ({effectiveRrr}R)
+              </div>
+            </>
+          ) : (
+            <div className="px-3 py-1 rounded font-bold text-xs font-mono border bg-zinc-900/70 border-zinc-700 text-zinc-400">
+              Entry / SL / TP: Waiting 9/9 Steps ({passedCount}/9)
+            </div>
+          )}
         </div>
       </div>
 
