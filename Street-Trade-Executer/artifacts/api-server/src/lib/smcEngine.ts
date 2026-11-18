@@ -135,8 +135,9 @@ function getSwingPoints(
     let isSh = true;
     let isSl = true;
     for (let j = 1; j <= nLeft; j++) {
-      if (bars[i]!.high <= bars[i - j]!.high) isSh = false;
-      if (bars[i]!.low >= bars[i - j]!.low) isSl = false;
+      // Allow equal highs/lows on the left so double-tops/bottoms register cleanly on their rightmost bar
+      if (bars[i]!.high < bars[i - j]!.high) isSh = false;
+      if (bars[i]!.low > bars[i - j]!.low) isSl = false;
     }
     for (let j = 1; j <= nRight; j++) {
       if (bars[i]!.high <= bars[i + j]!.high) isSh = false;
@@ -206,8 +207,7 @@ function detectMarketStructure(dfM15: OhlcBar[], scale: CryptoScale): "BULLISH" 
   if (hasLl) return currClose > keyResistance ? "BULLISH" : "BEARISH";
   if (hasHh) return currClose < keySupport ? "BEARISH" : "BULLISH";
   if (hasLh && hasHl) {
-    if (lastBearBos > lastBullBos) return "BEARISH";
-    if (lastBullBos > lastBearBos) return "BULLISH";
+    // Reject contracting choppy triangles (Lower High + Higher Low) as neutral
     return "NEUTRAL";
   }
   if (hasHl && !hasLl) return "BULLISH";
@@ -266,10 +266,19 @@ function detectLiquiditySweep(
         const sweepLow = twoBar ? Math.min(dfM5[i]!.low, dfM5[i + 1]!.low) : dfM5[i]!.low;
         const sweepEnd = twoBar ? i + 1 : i;
         let priorLower = false;
-        for (let k = Math.max(slIdx + 1, i - 3); k < i; k++) {
-          if (dfM5[k]!.low < sweepLow) {
+        // Reject stale swings that were already broken/swept earlier between slIdx and this sweep cluster
+        for (let k = slIdx + 1; k < Math.max(slIdx + 1, i - 1); k++) {
+          if (dfM5[k]!.low <= slVal - scale.minPenetration) {
             priorLower = true;
             break;
+          }
+        }
+        if (!priorLower) {
+          for (let k = Math.max(slIdx + 1, i - 3); k < i; k++) {
+            if (dfM5[k]!.low < sweepLow) {
+              priorLower = true;
+              break;
+            }
           }
         }
         let subsequentBreak = false;
@@ -310,10 +319,19 @@ function detectLiquiditySweep(
         const sweepHigh = twoBar ? Math.max(dfM5[i]!.high, dfM5[i + 1]!.high) : dfM5[i]!.high;
         const sweepEnd = twoBar ? i + 1 : i;
         let priorHigher = false;
-        for (let k = Math.max(shIdx + 1, i - 3); k < i; k++) {
-          if (dfM5[k]!.high > sweepHigh) {
+        // Reject stale swings that were already broken/swept earlier between shIdx and this sweep cluster
+        for (let k = shIdx + 1; k < Math.max(shIdx + 1, i - 1); k++) {
+          if (dfM5[k]!.high >= shVal + scale.minPenetration) {
             priorHigher = true;
             break;
+          }
+        }
+        if (!priorHigher) {
+          for (let k = Math.max(shIdx + 1, i - 3); k < i; k++) {
+            if (dfM5[k]!.high > sweepHigh) {
+              priorHigher = true;
+              break;
+            }
           }
         }
         let subsequentBreak = false;
@@ -629,41 +647,56 @@ function computeM15OpposingTarget(
   return { tpPrice: rndPrice(entryPrice - 2.2 * slDist, scale.digits), rrr: 2.2 };
 }
 
-/**
- * Computes real-time 9-Step Telemetry + M5 Candlestick Feed + Active SMC Zones (FVG, iFVG, OB, BREAKER)
- * for ANY searched Binance coin on-the-fly.
- */
-export function analyzeLiveSmcTelemetry(
-  symbol: string,
-  m5Bars: OhlcBar[],
-  m15Bars: OhlcBar[],
-  maxSlPct = 1.2,
-  leverage = 5,
-  minTargetRrr = 1.85
-) {
-  const symUpper = resolveBinanceSymbol(symbol);
-  if (!m5Bars.length || !m15Bars.length) {
-    return {
-      telemetry: { symbol: symUpper, m15_bias: "NEUTRAL ⚪", action: "NONE" },
-      activeZones: [] as Array<{ type: string; label: string; range: string }>,
-      rawZones: [] as Array<{ zoneType: string; low: number; high: number }>,
-      livePrice: 0,
-      slPrice: 0,
-      tpPrice: 0,
-      rrr: 0,
-      stepProgress: 0,
-    };
+interface SmcClosedEvaluation {
+  m15Bias: "BULLISH" | "BEARISH" | "NEUTRAL";
+  isBull: boolean;
+  isBear: boolean;
+  hasSweep: boolean;
+  sw: SweepResult;
+  chochOk: boolean;
+  chochLvl: number;
+  chochIdx: number;
+  fvgOk: boolean;
+  legFvgs: ZoneBox[];
+  retestOk: boolean;
+  s6Ok: boolean;
+  s7Ok: boolean;
+  s8Ok: boolean;
+  s9Ok: boolean;
+  slPrice: number;
+  tpPrice: number;
+  rrr: number;
+  action: "BUY" | "SELL" | "NONE";
+}
+
+function isRejectionConfirmed(closedBar: OhlcBar, isBull: boolean, refPrice: number): boolean {
+  const rng = Math.max(refPrice * 1e-5, closedBar.high - closedBar.low);
+  const body = Math.abs(closedBar.close - closedBar.open);
+  const uw = closedBar.high - Math.max(closedBar.open, closedBar.close);
+  const lw = Math.min(closedBar.open, closedBar.close) - closedBar.low;
+  if (isBull) {
+    const strongBullBody = closedBar.close > closedBar.open && body / rng >= 0.3 && uw / rng <= 0.45;
+    const bullPinbar = lw / rng >= 0.45 && closedBar.open - closedBar.close <= 0.2 * rng;
+    return strongBullBody || bullPinbar;
   }
+  const strongBearBody = closedBar.close < closedBar.open && body / rng >= 0.3 && lw / rng <= 0.45;
+  const bearPinbar = uw / rng >= 0.45 && closedBar.close - closedBar.open <= 0.2 * rng;
+  return strongBearBody || bearPinbar;
+}
 
-  const closedBars = m5Bars.length > 20 ? m5Bars.slice(0, -1) : m5Bars;
-  const livePrice = m5Bars[m5Bars.length - 1]!.close;
-  const scale = computeCryptoScale(livePrice);
-  const allZones = detectSmcZones(m5Bars, scale, 0);
+function evaluateClosedSmcSetup(
+  closedBars: OhlcBar[],
+  m15Bars: OhlcBar[],
+  entryPrice: number,
+  maxSlPct: number,
+  leverage: number,
+  minTargetRrr: number,
+  scale: CryptoScale
+): SmcClosedEvaluation {
   const m15Bias = detectMarketStructure(m15Bars, scale);
-
-  const sweeps = detectLiquiditySweep(closedBars, scale);
   const isBull = m15Bias === "BULLISH";
   const isBear = m15Bias === "BEARISH";
+  const sweeps = detectLiquiditySweep(closedBars, scale);
   const hasSweep = (isBull && sweeps.sellSweep.found) || (isBear && sweeps.buySweep.found);
   const sw = isBull ? sweeps.sellSweep : sweeps.buySweep;
 
@@ -693,6 +726,9 @@ export function analyzeLiveSmcTelemetry(
       chochOk = true;
       chochLvl = ch.level;
       chochIdx = ch.idx;
+
+      // Step 4: Only FVGs created within the Sweep -> CHoCH impulse leg (+1 follow-through bar) qualify
+      const maxLegIdx = Math.min(closedIdx, ch.idx + 1);
       const lz = detectSmcZones(
         closedBars,
         scale,
@@ -700,35 +736,32 @@ export function analyzeLiveSmcTelemetry(
         isBull ? sw.sweepExtreme : undefined,
         isBull ? undefined : sw.sweepExtreme
       );
-      legFvgs = isBull ? lz.bullFvg : lz.bearFvg;
+      legFvgs = (isBull ? lz.bullFvg : lz.bearFvg).filter((z) => z.idx >= sw.sweepIdx && z.idx <= maxLegIdx);
+
       if (legFvgs.length > 0) {
         fvgOk = true;
         const matched = checkFvgRetest(closedBar, prevBar, closedIdx, legFvgs, isBull, scale);
         if (matched) {
           retestOk = true;
-          const rng = Math.max(livePrice * 1e-5, closedBar.high - closedBar.low);
-          if (isBull) {
-            const lw = Math.min(closedBar.open, closedBar.close) - closedBar.low;
-            s6Ok = closedBar.close > closedBar.open || (lw / rng >= 0.45 && closedBar.open - closedBar.close <= 0.25 * rng);
-            if (s6Ok) s7Ok = closedBar.close >= matched.low && livePrice <= matched.high + scale.maxChaseDist;
-          } else {
-            const uw = closedBar.high - Math.max(closedBar.open, closedBar.close);
-            s6Ok = closedBar.close < closedBar.open || (uw / rng >= 0.45 && closedBar.close - closedBar.open <= 0.25 * rng);
-            if (s6Ok) s7Ok = closedBar.close <= matched.high && livePrice >= matched.low - scale.maxChaseDist;
+          s6Ok = isRejectionConfirmed(closedBar, isBull, scale.refPrice);
+          if (s6Ok) {
+            s7Ok = isBull
+              ? closedBar.close >= matched.low && entryPrice <= matched.high + scale.maxChaseDist
+              : closedBar.close <= matched.high && entryPrice >= matched.low - scale.maxChaseDist;
           }
           if (s7Ok) {
             slPrice = rndPrice(isBull ? sw.sweepExtreme - scale.slBuf : sw.sweepExtreme + scale.slBuf, scale.digits);
-            const slDist = Math.abs(livePrice - slPrice);
-            const slPct = livePrice > 0 ? (slDist / livePrice) * 100 : 99;
+            const slDist = isBull ? entryPrice - slPrice : slPrice - entryPrice;
+            const slPct = entryPrice > 0 ? (slDist / entryPrice) * 100 : 99;
             const liqSafe = Math.min(maxSlPct, 60 / Math.max(1, leverage));
             // Fee-safe minimum structural stop (>= 0.35%) so Binance commissions never eat profit edge
             if (slDist > 0 && slPct >= 0.35 && slPct <= liqSafe) {
               s8Ok = true;
-              const targ = computeM15OpposingTarget(isBull, m15Bars, livePrice, slDist, minTargetRrr, scale);
+              const targ = computeM15OpposingTarget(isBull, m15Bars, entryPrice, slDist, minTargetRrr, scale);
               tpPrice = targ.tpPrice;
               rrr = targ.rrr;
-              const tpDist = Math.abs(tpPrice - livePrice);
-              const feeEst = livePrice * 0.0007; // 0.05% taker entry + 0.02% maker TP
+              const tpDist = Math.abs(tpPrice - entryPrice);
+              const feeEst = entryPrice * 0.0007; // 0.05% taker entry + 0.02% maker TP
               const netRrr = (tpDist - feeEst) / (slDist + feeEst);
               if (rrr >= minTargetRrr && netRrr >= 1.75) {
                 s9Ok = true;
@@ -740,6 +773,65 @@ export function analyzeLiveSmcTelemetry(
       }
     }
   }
+
+  return {
+    m15Bias,
+    isBull,
+    isBear,
+    hasSweep,
+    sw,
+    chochOk,
+    chochLvl,
+    chochIdx,
+    fvgOk,
+    legFvgs,
+    retestOk,
+    s6Ok,
+    s7Ok,
+    s8Ok,
+    s9Ok,
+    slPrice,
+    tpPrice,
+    rrr,
+    action,
+  };
+}
+
+/**
+ * Computes real-time 9-Step Telemetry + M5 Candlestick Feed + Active SMC Zones (FVG, iFVG, OB, BREAKER)
+ * for ANY searched Binance coin on-the-fly.
+ */
+export function analyzeLiveSmcTelemetry(
+  symbol: string,
+  m5Bars: OhlcBar[],
+  m15Bars: OhlcBar[],
+  maxSlPct = 1.2,
+  leverage = 5,
+  minTargetRrr = 1.85
+) {
+  const symUpper = resolveBinanceSymbol(symbol);
+  if (!m5Bars.length || !m15Bars.length) {
+    return {
+      telemetry: { symbol: symUpper, m15_bias: "NEUTRAL ⚪", action: "NONE" },
+      activeZones: [] as Array<{ type: string; label: string; range: string }>,
+      rawZones: [] as Array<{ zoneType: string; low: number; high: number }>,
+      livePrice: 0,
+      slPrice: 0,
+      tpPrice: 0,
+      rrr: 0,
+      stepProgress: 0,
+    };
+  }
+
+  const closedBars = m5Bars.length > 20 ? m5Bars.slice(0, -1) : m5Bars;
+  const closedIdx = closedBars.length - 1;
+  const livePrice = m5Bars[m5Bars.length - 1]!.close;
+  const scale = computeCryptoScale(livePrice);
+  const allZones = detectSmcZones(m5Bars, scale, 0);
+
+  const ev = evaluateClosedSmcSetup(closedBars, m15Bars, livePrice, maxSlPct, leverage, minTargetRrr, scale);
+  const { m15Bias, isBull, isBear, hasSweep, sw, chochOk, chochLvl, chochIdx, fvgOk, legFvgs, retestOk, s6Ok, s7Ok, s8Ok, s9Ok, slPrice, action } = ev;
+  let { tpPrice, rrr } = ev;
 
   if (tpPrice <= 0 && (isBull || isBear)) {
     const estSlDist = hasSweep ? Math.abs(livePrice - sw.sweepExtreme) + scale.slBuf : livePrice * 0.005;
@@ -1048,89 +1140,25 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
     if (m15Slice.length < 15 || m5Slice.length < 12) continue;
 
     const scale = computeCryptoScale(m5Slice[m5Slice.length - 1]!.close);
-    const m15Bias = detectMarketStructure(m15Slice, scale);
-    if (m15Bias === "NEUTRAL") continue;
-
-    const { sellSweep, buySweep } = detectLiquiditySweep(m5Slice, scale);
-    const closedIdx = m5Slice.length - 1;
-    const closedBar = m5Slice[closedIdx]!;
-    const prevBar = m5Slice[closedIdx - 1]!;
     const entryPrice = rndPrice(entryBar.open, scale.digits);
-    const liqSafeSlPct = Math.min(maxSlPct, 60 / Math.max(1, leverage));
-
-    if (m15Bias === "BULLISH" && sellSweep.found) {
-      const choch = detectChochBos(m5Slice, sellSweep.sweepIdx, true);
-      if (choch.found && closedIdx - choch.idx <= 18 && closedBar.close >= sellSweep.sweepExtreme) {
-        const zones = detectSmcZones(m5Slice, scale, sellSweep.sweepIdx, sellSweep.sweepExtreme);
-        const matched = checkFvgRetest(closedBar, prevBar, closedIdx, zones.bullFvg, true, scale);
-        if (matched) {
-          const lw = Math.min(closedBar.open, closedBar.close) - closedBar.low;
-          const rng = Math.max(scale.refPrice * 1e-5, closedBar.high - closedBar.low);
-          const isPin = lw / rng >= 0.45 && closedBar.open - closedBar.close <= 0.25 * rng;
-          if (closedBar.close >= matched.low && (closedBar.close > closedBar.open || isPin)) {
-            const slPrice = rndPrice(sellSweep.sweepExtreme - scale.slBuf, scale.digits);
-            const slDist = entryPrice - slPrice;
-            const slPct = (slDist / entryPrice) * 100;
-            if (slDist > 0 && slPct <= liqSafeSlPct && entryPrice <= matched.high + scale.maxChaseDist) {
-              const target = computeM15OpposingTarget(true, m15Slice, entryPrice, slDist, minRrr, scale);
-              if (target.rrr >= minRrr) {
-                const sz = sizeSimCryptoPosition(entryPrice, slPrice, balance, riskPercent, leverage, maxMarginPct, accountMode);
-                if (sz.qty > 0) {
-                  openPos = {
-                    type: "BUY",
-                    ...sz,
-                    entryPrice,
-                    slPrice,
-                    initialSlPrice: slPrice,
-                    slDist,
-                    tpPrice: target.tpPrice,
-                    targetRrr: target.rrr,
-                    breakevenApplied: false,
-                    entryTimeMs: entryBar.time,
-                    sessionLabel: getPktSessionLabel(entryBar.time),
-                  };
-                }
-              }
-            }
-          }
-        }
-      }
-    } else if (m15Bias === "BEARISH" && buySweep.found) {
-      const choch = detectChochBos(m5Slice, buySweep.sweepIdx, false);
-      if (choch.found && closedIdx - choch.idx <= 18 && closedBar.close <= buySweep.sweepExtreme) {
-        const zones = detectSmcZones(m5Slice, scale, buySweep.sweepIdx, undefined, buySweep.sweepExtreme);
-        const matched = checkFvgRetest(closedBar, prevBar, closedIdx, zones.bearFvg, false, scale);
-        if (matched) {
-          const uw = closedBar.high - Math.max(closedBar.open, closedBar.close);
-          const rng = Math.max(scale.refPrice * 1e-5, closedBar.high - closedBar.low);
-          const isPin = uw / rng >= 0.45 && closedBar.close - closedBar.open <= 0.25 * rng;
-          if (closedBar.close <= matched.high && (closedBar.close < closedBar.open || isPin)) {
-            const slPrice = rndPrice(buySweep.sweepExtreme + scale.slBuf, scale.digits);
-            const slDist = slPrice - entryPrice;
-            const slPct = (slDist / entryPrice) * 100;
-            if (slDist > 0 && slPct <= liqSafeSlPct && entryPrice >= matched.low - scale.maxChaseDist) {
-              const target = computeM15OpposingTarget(false, m15Slice, entryPrice, slDist, minRrr, scale);
-              if (target.rrr >= minRrr) {
-                const sz = sizeSimCryptoPosition(entryPrice, slPrice, balance, riskPercent, leverage, maxMarginPct, accountMode);
-                if (sz.qty > 0) {
-                  openPos = {
-                    type: "SELL",
-                    ...sz,
-                    entryPrice,
-                    slPrice,
-                    initialSlPrice: slPrice,
-                    slDist,
-                    tpPrice: target.tpPrice,
-                    targetRrr: target.rrr,
-                    breakevenApplied: false,
-                    entryTimeMs: entryBar.time,
-                    sessionLabel: getPktSessionLabel(entryBar.time),
-                  };
-                }
-              }
-            }
-          }
-        }
+    const ev = evaluateClosedSmcSetup(m5Slice, m15Slice, entryPrice, maxSlPct, leverage, minRrr, scale);
+    if (ev.action === "BUY" || ev.action === "SELL") {
+      const sz = sizeSimCryptoPosition(entryPrice, ev.slPrice, balance, riskPercent, leverage, maxMarginPct, accountMode);
+      if (sz.qty > 0) {
+        const slDist = Math.abs(entryPrice - ev.slPrice);
+        openPos = {
+          type: ev.action,
+          ...sz,
+          entryPrice,
+          slPrice: ev.slPrice,
+          initialSlPrice: ev.slPrice,
+          slDist,
+          tpPrice: ev.tpPrice,
+          targetRrr: ev.rrr,
+          breakevenApplied: false,
+          entryTimeMs: entryBar.time,
+          sessionLabel: getPktSessionLabel(entryBar.time),
+        };
       }
     }
   }
