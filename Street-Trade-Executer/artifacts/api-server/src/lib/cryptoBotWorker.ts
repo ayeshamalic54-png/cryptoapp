@@ -399,7 +399,40 @@ async function executeSingleFuturesOrder(
   await cancelAllOrders(binSym);
   const exitSide = side === "BUY" ? "SELL" : "BUY";
   await placeConditionalClose(binSym, exitSide, "STOP_MARKET", slRound);
-  await placeLowFeeTpOrder(binSym, exitSide, tpRound, execQty);
+
+  // Split into 2-Stage Institutional Partial Profit: 50% Limit TP1 @ +0.85R + 50% Runner TP2 @ tpRound
+  const initSlDist = Math.abs(fillPrice - slRound);
+  const tp1Raw = side === "BUY" ? fillPrice + initSlDist * 0.85 : fillPrice - initSlDist * 0.85;
+  const tp1Round = quantizeTick(tp1Raw, filter.tickSize);
+  const tp1Qty = quantizeStep(execQty * 0.5, filter.stepSize, false);
+  const tp2Qty = quantizeStep(execQty - tp1Qty, filter.stepSize, false);
+  const tp1DirectionalOk = side === "BUY" ? tp1Round > fillPrice && tp1Round < tpRound : tp1Round < fillPrice && tp1Round > tpRound;
+  const canSplitTp =
+    tp1DirectionalOk &&
+    tp1Qty >= filter.minQty &&
+    tp2Qty >= filter.minQty &&
+    tp1Qty * tp1Round >= 6.0 &&
+    tp2Qty * tpRound >= 6.0;
+
+  let splitPlaced = false;
+  if (canSplitTp) {
+    const tp1Res = await signedBinanceRequest("POST", "/fapi/v1/order", {
+      symbol: binSym,
+      side: exitSide,
+      type: "LIMIT",
+      timeInForce: "GTC",
+      quantity: String(tp1Qty),
+      price: String(tp1Round),
+      reduceOnly: "true",
+    });
+    if (tp1Res.ok) {
+      await placeLowFeeTpOrder(binSym, exitSide, tpRound, tp2Qty);
+      splitPlaced = true;
+    }
+  }
+  if (!splitPlaced) {
+    await placeLowFeeTpOrder(binSym, exitSide, tpRound, execQty);
+  }
 
   await db.execute(
     sql`INSERT INTO trades (ticket, symbol, order_type, lots, entry_price, sl, tp, entry_time, status, comment, signal_id, mt5_login)
@@ -650,19 +683,15 @@ async function runFastCycle() {
         );
       }
 
-      // Guardian Shield + Exact Forex-Style Pure Risk-Free Breakeven Guard (ZERO Trailing Stop!)
-      // Matches Forex apply_pure_breakeven_guard():
-      //   1. Profit >= 0.35 * riskBudget (+$35 USD on $10k @ 1% risk, or peak reached that level)
-      //   2. OR open >= 60 mins & floating >= +$5 USD (scaled proportionally for smaller personal accounts)
-      //   Moves SL ONCE to Entry +/- 0.15% fee buffer while leaving structural Maker TP untouched.
+      // Guardian Shield + 2-Stage Partial Profit Breakeven Guard (+0.85R / 50% TP1 Fill -> Fee-Neutral +0.05% BE)
+      // Matches backtest mechanics: no premature 0.35R / 60m clipping while winners develop.
       const accMode = String(botRow.account_mode || "PROP_FIRM").toUpperCase();
       const shieldPct = Number(botRow.guardian_shield_pct ?? 1.8);
       const riskEnabled = Boolean(botRow.risk_limits_enabled ?? true);
       const riskPct = Number(botRow.risk_percent ?? 1.0);
       const effRiskPct = accMode === "PROP_FIRM" ? Math.min(riskPct, 1.75) : riskPct;
       const riskBudgetUsd = equity > 0 ? equity * (effRiskPct / 100) : 100;
-      const beTriggerUsd = accMode === "PROP_FIRM" ? Math.max(10.0, Number((riskBudgetUsd * 0.35).toFixed(2))) : Math.max(0.5, Number((riskBudgetUsd * 0.35).toFixed(2)));
-      const stagProfitMinUsd = accMode === "PROP_FIRM" ? Math.max(2.0, Number((riskBudgetUsd * 0.05).toFixed(2))) : Math.max(0.25, Number((riskBudgetUsd * 0.05).toFixed(2)));
+      const tp1TriggerUsd = accMode === "PROP_FIRM" ? Math.max(15.0, Number((riskBudgetUsd * 0.85).toFixed(2))) : Math.max(1.0, Number((riskBudgetUsd * 0.85).toFixed(2)));
 
       for (const p of positions) {
         const upnl = Number(p.unrealizedPnl || 0);
@@ -673,7 +702,7 @@ async function runFastCycle() {
         }
         const meta = ((
           await db.execute(
-            sql`SELECT ticket, (EXTRACT(EPOCH FROM (entry_time AT TIME ZONE 'UTC')) * 1000) AS entry_ms, entry_price, COALESCE(sl,0) AS sl, COALESCE(tp,0) AS tp
+            sql`SELECT ticket, (EXTRACT(EPOCH FROM (entry_time AT TIME ZONE 'UTC')) * 1000) AS entry_ms, entry_price, COALESCE(lots,0) AS lots, COALESCE(sl,0) AS sl, COALESCE(tp,0) AS tp
                 FROM trades WHERE status='OPEN' AND UPPER(symbol)=${p.symbol.toUpperCase()} ORDER BY entry_time DESC LIMIT 1`
           )
         ).rows || [])[0] as any;
@@ -683,34 +712,33 @@ async function runFastCycle() {
         peakFloatingMap.set(ticket, peakFloat);
         if (beLockedTickets.has(ticket)) continue;
 
-        const entryMs = Number(meta.entry_ms || 0);
-        const ageSec = entryMs > 0 ? Math.max(0, (Date.now() - entryMs) / 1000) : 0;
-
         const isLong = p.side === "BUY";
         const entryP = Number(meta.entry_price || p.entryPrice);
+        const origLots = Number(meta.lots || 0);
         const slP = Number(meta.sl || 0);
         const tpP = Number(meta.tp || 0);
-        const alreadyBe = isLong ? slP >= entryP * 1.0005 : slP > 0 && slP <= entryP * 0.9995;
+        const alreadyBe = isLong ? slP >= entryP * 1.0002 : slP > 0 && slP <= entryP * 0.9998;
         if (alreadyBe) {
           beLockedTickets.add(ticket);
           continue;
         }
 
-        const profitBeHit = Math.max(upnl, peakFloat) >= beTriggerUsd;
-        const stagBeHit = ageSec >= 3600 && upnl >= stagProfitMinUsd;
+        const initSlDist = slP > 0 ? Math.abs(entryP - slP) : entryP * 0.0055;
+        const tp1Target = isLong ? entryP + initSlDist * 0.85 : entryP - initSlDist * 0.85;
+        const tp1PriceHit = isLong ? p.markPrice >= tp1Target : p.markPrice <= tp1Target;
+        const partialFilled = origLots > 0 && p.qty <= origLots * 0.72;
+        const profitBeHit = Math.max(upnl, peakFloat) >= tp1TriggerUsd;
 
-        if (profitBeHit || stagBeHit) {
+        if (partialFilled || tp1PriceHit || profitBeHit) {
           const filter = await getSymbolFilters(p.symbol);
-          const beSl = quantizeTick(isLong ? entryP * 1.0015 : entryP * 0.9985, filter.tickSize);
+          const beSl = quantizeTick(isLong ? entryP * 1.0005 : entryP * 0.9995, filter.tickSize);
           // Safety check: only move SL if markPrice is safely on winning side of beSl so STOP_MARKET doesn't reject -2021
           const safeGap = isLong ? p.markPrice > beSl * 1.0004 : p.markPrice < beSl * 0.9996;
           if (!safeGap) continue;
 
           const exitSide = isLong ? "SELL" : "BUY";
-          // Cancel ONLY existing SL conditional orders AFTER placing new BE SL, or replace SL/TP safely
           const okBe = await placeConditionalClose(p.symbol, exitSide, "STOP_MARKET", beSl);
           if (okBe) {
-            // Cancel prior open algo orders except newest beSl if duplicates exist, then ensure TP active cleanly
             const aoRes = await signedBinanceRequest("GET", "/fapi/v1/openAlgoOrders", { symbol: p.symbol });
             if (aoRes.ok && Array.isArray(aoRes.data)) {
               for (const ao of aoRes.data) {
@@ -722,13 +750,13 @@ async function runFastCycle() {
             }
             beLockedTickets.add(ticket);
             await db.execute(sql`UPDATE trades SET sl=${beSl.toString()} WHERE ticket=${ticket}`);
-            const reasonStr = profitBeHit
-              ? `Profit +$${Math.max(upnl, peakFloat).toFixed(2)} >= +$${beTriggerUsd.toFixed(2)}`
-              : `60m Stagnation (${(ageSec / 60).toFixed(0)}m, +$${upnl.toFixed(2)})`;
+            const reasonStr = partialFilled
+              ? `50% TP1 Filled (@ +0.85R)`
+              : `Reached +0.85R ($${Math.max(upnl, peakFloat).toFixed(2)} >= $${tp1TriggerUsd.toFixed(2)})`;
             await postDiscordPayload(
-              `🛡️ **PURE FOREX-STYLE BREAKEVEN LOCKED** · \`${p.symbol}\` (#${ticket})\n` +
+              `🛡️ **TP1 + FEE-NEUTRAL BREAKEVEN LOCKED** · \`${p.symbol}\` (#${ticket})\n` +
                 `Trigger: \`${reasonStr}\`\n` +
-                `SL locked ONCE at \`$${formatCryptoPrice(beSl)}\` (+0.15% fee buffer — Zero Trailing) | TP untouched at \`$${formatCryptoPrice(tpP)}\``
+                `Runner SL locked at \`$${formatCryptoPrice(beSl)}\` (+0.05% fee-neutral BE) | TP2 active at \`$${formatCryptoPrice(tpP)}\``
             );
           }
         }

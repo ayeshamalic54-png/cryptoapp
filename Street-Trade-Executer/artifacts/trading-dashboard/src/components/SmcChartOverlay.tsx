@@ -974,11 +974,11 @@ export function SmcChartOverlay({
                 : !s6Pass
                 ? "Step 1-5 PASS 🟢 — Step 6 PENDING ⚪: Waiting for FVG Rejection Candle"
                 : !s7Pass
-                ? "Step 1-6 PASS 🟢 — Step 7 PENDING ⚪: Waiting for Closed Candle Confirmation"
+                ? "Step 1-6 PASS 🟢 — Step 7 PENDING ⚪: Waiting for Closed Candle & M15 Discount/Premium Alignment"
                 : !s8Pass
                 ? "Step 1-7 PASS 🟢 — Step 8 PENDING 🔴: Structural SL cap / Liquidation safety guard"
                 : !s9Pass
-                ? "Step 1-8 PASS 🟢 — Step 9 BLOCKED 🔴: Nearest Unbroken M15 Target < 1.35R / > 3.5R"
+                ? "Step 1-8 PASS 🟢 — Step 9 BLOCKED 🔴: Nearest Unbroken M15 Target < 1.25R / > 3.5R"
                 : "Steps 1-9 VERIFIED 🟢 — All Pure SMC Conditions Aligned!"}
             </p>
           </div>
@@ -1382,9 +1382,9 @@ export function SmcChartOverlay({
             { label: "S4: Displacement FVG", pass: s4Pass, badge: s4Pass ? fvgStatus : "PENDING ⚪", desc: s4Pass ? "3-candle displacement FVG active in impulse leg." : "Waiting for sweep-to-CHoCH displacement imbalance." },
             { label: "S5: Closed FVG Retest", pass: s5Pass, badge: s5Pass ? retestStatus : "PENDING ⚪", desc: s5Pass ? "Closed M5 bar tapped & respected Displacement FVG." : "Waiting for closed pullback into FVG zone." },
             { label: "S6: Rejection Candle", pass: s6Pass, badge: s6Pass ? s6Status : "PENDING ⚪", desc: s6Pass ? "Confirmed rejection candle / pin off FVG." : "Waiting for closed rejection close or hammer/star." },
-            { label: "S7: Close & Anti-Chase", pass: s7Pass, badge: s7Pass ? s7Status : "PENDING ⚪", desc: s7Pass ? "Closed confirmation without chasing past FVG." : "Entry waits strictly for candle close & chase guard." },
-            { label: "S8: SL Guard (0.08% Buf)", pass: s8Pass, badge: s8Status || (s8Pass ? "PASS 🟢" : "PENDING ⚪"), desc: s8Pass ? `SL anchored $${fmtP(slPrice)} behind sweep (Liq-Safe).` : "Locks 0.08% beyond sweep wick + max SL/liq cap." },
-            { label: "S9: M15 Opposing Target", pass: s9Pass, badge: s9Status || (s9Pass ? `PASS 🟢 (${effectiveRrr}R)` : "PENDING ⚪"), desc: s9Pass ? `Unbroken M15 liquidity TP at $${fmtP(tpPrice)} (${effectiveRrr}R).` : "Requires unobstructed M15 Swing Target (1.35R–3.5R)." },
+            { label: "S7: Close & Discount/Prem", pass: s7Pass, badge: s7Pass ? s7Status : "PENDING ⚪", desc: s7Pass ? "Confirmed inside M15 Discount/Premium zone (anti-chase)." : "Waits for close + M15 Discount (BUY) / Premium (SELL) alignment." },
+            { label: "S8: SL Guard (≥0.50% Floor)", pass: s8Pass, badge: s8Status || (s8Pass ? "PASS 🟢" : "PENDING ⚪"), desc: s8Pass ? `SL anchored $${fmtP(slPrice)} behind sweep (≥0.50% noise floor).` : "Locks behind sweep wick with 0.50% minimum noise breathing room." },
+            { label: "S9: M15 Opposing Target", pass: s9Pass, badge: s9Status || (s9Pass ? `PASS 🟢 (${effectiveRrr}R)` : "PENDING ⚪"), desc: s9Pass ? `Opposing M15 liquidity TP at $${fmtP(tpPrice)} (${effectiveRrr}R, 1.75R cap).` : "Requires unobstructed M15 Swing Target (≥1.25R, capped 1.75R)." },
           ].map((c) => (
             <div key={c.label} className={cn("p-3 rounded-lg border transition-all", c.pass ? "bg-emerald-950/30 border-emerald-500/50 text-white" : "bg-[#0d121f] border-zinc-800 text-zinc-400")}>
               <div className="flex items-center justify-between mb-1 gap-1">

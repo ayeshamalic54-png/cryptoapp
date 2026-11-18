@@ -212,7 +212,7 @@ export default function Backtest() {
               </label>
               <label className="flex items-center gap-2 text-xs font-mono cursor-pointer">
                 <Switch checked={breakevenEnabled} onCheckedChange={setBreakevenEnabled} />
-                <span>One-Time Risk-Free Breakeven (+1.0R / 60m)</span>
+                <span>2-Stage Partial Profit (50% @ +0.85R → Fee-Safe BE)</span>
               </label>
             </div>
             <Button onClick={handleRunBacktest} disabled={loading || isReadOnly} className="bg-indigo-600 hover:bg-indigo-500 font-mono text-xs font-bold gap-2">

@@ -754,6 +754,26 @@ function computeProtectedSweepAnchor(
   return anchorExt;
 }
 
+/** Causal position of `price` within `[0..1]` of the last `lookback` closed M15 bars. */
+function rangePosition(bars: OhlcBar[], lookback: number, price: number): number {
+  const slice = bars.slice(-lookback);
+  if (slice.length === 0) return 0.5;
+  let hi = -Infinity;
+  let lo = Infinity;
+  for (const b of slice) {
+    if (b.high > hi) hi = b.high;
+    if (b.low < lo) lo = b.low;
+  }
+  return hi > lo ? (price - lo) / (hi - lo) : 0.5;
+}
+
+/** ICT Discount/Premium alignment: avoid buying M15 overextended highs or selling M15 overextended lows. */
+function isM15EquilibriumAligned(isBuy: boolean, m15Bars: OhlcBar[], entryPrice: number): boolean {
+  const pos48 = rangePosition(m15Bars, 48, entryPrice);
+  const pos24 = rangePosition(m15Bars, 24, entryPrice);
+  return isBuy ? pos48 <= 0.60 && pos24 <= 0.72 : pos48 >= 0.40 && pos24 >= 0.28;
+}
+
 function evaluateClosedSmcSetup(
   closedBars: OhlcBar[],
   m15Bars: OhlcBar[],
@@ -815,27 +835,45 @@ function evaluateClosedSmcSetup(
           retestOk = true;
           s6Ok = isRejectionConfirmed(closedBar, isBull, scale.refPrice);
           if (s6Ok) {
-            s7Ok = isBull
+            const closeConfirmed = isBull
               ? closedBar.close >= matched.low && entryPrice <= matched.high + scale.maxChaseDist
               : closedBar.close <= matched.high && entryPrice >= matched.low - scale.maxChaseDist;
+            s7Ok = closeConfirmed && isM15EquilibriumAligned(isBull, m15Bars, entryPrice);
           }
           if (s7Ok) {
             const slAnchor = computeProtectedSweepAnchor(closedBars, closedIdx, sw.sweepExtreme, isBull, scale);
-            slPrice = rndPrice(isBull ? slAnchor - scale.slBuf : slAnchor + scale.slBuf, scale.digits);
-            const slDist = isBull ? entryPrice - slPrice : slPrice - entryPrice;
-            const slPct = entryPrice > 0 ? (slDist / entryPrice) * 100 : 99;
+            const rawSlPrice = rndPrice(isBull ? slAnchor - scale.slBuf : slAnchor + scale.slBuf, scale.digits);
+            const rawSlDist = isBull ? entryPrice - rawSlPrice : rawSlPrice - entryPrice;
+            const rawSlPct = entryPrice > 0 ? (rawSlDist / entryPrice) * 100 : 99;
             const liqSafe = Math.min(maxSlPct, 60 / Math.max(1, leverage));
-            // Fee-safe minimum structural stop (>= 0.35%) so Binance commissions never eat profit edge
-            if (slDist > 0 && slPct >= 0.35 && slPct <= liqSafe) {
-              s8Ok = true;
-              const targ = computeM15OpposingTarget(isBull, m15Bars, entryPrice, slDist, minTargetRrr, scale);
-              tpPrice = targ.tpPrice;
-              rrr = targ.rrr;
-              const tpDist = Math.abs(tpPrice - entryPrice);
+            // Structural minimum 0.35% stop, widened cleanly to a 0.50% crypto noise breathing floor when maxSl allows
+            if (rawSlDist > 0 && rawSlPct >= 0.35 && rawSlPct <= liqSafe) {
+              const minFloorDist = liqSafe >= 0.5 ? entryPrice * 0.005 : 0;
+              slPrice =
+                rawSlDist < minFloorDist
+                  ? rndPrice(isBull ? entryPrice - minFloorDist : entryPrice + minFloorDist, scale.digits)
+                  : rawSlPrice;
+              const slDist = isBull ? entryPrice - slPrice : slPrice - entryPrice;
+              s8Ok = slDist > 0;
+              const targ = computeM15OpposingTarget(isBull, m15Bars, entryPrice, rawSlDist, minTargetRrr, scale);
+              const rawTpDist = Math.abs(targ.tpPrice - entryPrice);
+              const cappedTpDist = Math.min(rawTpDist, slDist * 1.75);
+              const finalTpPrice = rndPrice(isBull ? entryPrice + cappedTpDist : entryPrice - cappedTpDist, scale.digits);
+              const actualTpDist = Math.abs(finalTpPrice - entryPrice);
+              const cappedRrr = slDist > 0 ? Number((actualTpDist / slDist).toFixed(2)) : 0;
+              tpPrice = finalTpPrice;
+              rrr = cappedRrr;
               const feeEst = entryPrice * 0.0007; // 0.05% taker entry + 0.02% maker TP
-              const netRrr = (tpDist - feeEst) / (slDist + feeEst);
-              const minNetRrr = Math.max(1.15, minTargetRrr - 0.15);
-              if (tpPrice > 0 && rrr >= minTargetRrr && rrr <= 3.5 && netRrr >= minNetRrr) {
+              const netRrr = (actualTpDist - feeEst) / (slDist + feeEst);
+              const minPostWidenRrr = Math.max(1.25, minTargetRrr - 0.1);
+              const minNetRrr = Math.max(1.15, minTargetRrr - 0.2);
+              if (
+                targ.tpPrice > 0 &&
+                targ.rrr >= minTargetRrr &&
+                targ.rrr <= 3.5 &&
+                cappedRrr >= minPostWidenRrr &&
+                netRrr >= minNetRrr
+              ) {
                 s9Ok = true;
                 action = isBull ? "BUY" : "SELL";
               }
@@ -1121,6 +1159,11 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
   }
 
   let openPos: OpenPos | null = null;
+  let posInitialQty = 0;
+  let posRemainingQty = 0;
+  let posRealizedUsd = 0;
+  let posRealizedGrossUsd = 0;
+  let posPartialTaken = false;
   let lastTradeExitBar = -10;
   const trades: CryptoTradeSim[] = [];
   const equityCurve: Array<{ time: string; balance: number }> = [
@@ -1129,6 +1172,43 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
 
   // Round-trip taker fee modeling (~0.08% total on USDT-M futures)
   const feeRate = 0.0004;
+
+  const finalizePositionExit = (pos: OpenPos, exitPrice: number, exitTimeMs: number, reason: CryptoTradeSim["reason"]) => {
+    const remDelta = pos.type === "BUY" ? exitPrice - pos.entryPrice : pos.entryPrice - exitPrice;
+    const remGross = remDelta * posRemainingQty;
+    const remFees = (pos.entryPrice + exitPrice) * posRemainingQty * feeRate;
+    const profitUsd = Number((posRealizedUsd + remGross - remFees).toFixed(2));
+    const profitPct = Number(((profitUsd / Math.max(1, balance)) * 100).toFixed(2));
+    balance = Number((balance + profitUsd).toFixed(2));
+    if (balance > peakEquity) peakEquity = balance;
+    const dd = peakEquity > 0 ? ((peakEquity - balance) / peakEquity) * 100 : 0;
+    if (dd > maxDrawdownPct) maxDrawdownPct = dd;
+
+    const totalGross = posRealizedGrossUsd + remGross;
+    const achievedRrr = pos.qty * pos.slDist > 0 ? Number((totalGross / (pos.qty * pos.slDist)).toFixed(2)) : 0;
+    const digits = inferCryptoDigits(pos.entryPrice);
+    trades.push({
+      type: pos.type,
+      symbol: binSym,
+      qty: pos.qty,
+      marginUsed: pos.marginUsed,
+      marginPct: pos.marginPct,
+      entryPrice: rndPrice(pos.entryPrice, digits),
+      exitPrice: rndPrice(exitPrice, digits),
+      slPrice: rndPrice(pos.initialSlPrice, digits),
+      tpPrice: rndPrice(pos.tpPrice, digits),
+      targetRrr: pos.targetRrr,
+      achievedRrr,
+      profitUsd,
+      profitPercent: profitPct,
+      breakevenTriggered: pos.breakevenApplied,
+      sessionLabel: pos.sessionLabel,
+      reason,
+      entryTime: new Date(pos.entryTimeMs).toISOString(),
+      exitTime: new Date(exitTimeMs).toISOString(),
+    });
+    equityCurve.push({ time: new Date(exitTimeMs).toISOString(), balance });
+  };
 
   for (let i = 45; i < m5Bars.length - 1; i++) {
     const currBar = m5Bars[i]!;
@@ -1139,71 +1219,39 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
     if (openPos) {
       let exitPrice: number | null = null;
       let reason: CryptoTradeSim["reason"] | null = null;
+      const isLong = openPos.type === "BUY";
 
-      if (openPos.type === "BUY") {
-        if (currBar.low <= openPos.slPrice) {
-          exitPrice = openPos.slPrice;
-          reason = openPos.breakevenApplied ? "BREAKEVEN_LOCKED" : "SL_HIT";
-        } else if (currBar.high >= openPos.tpPrice) {
-          exitPrice = openPos.tpPrice;
-          reason = "TP_HIT";
-        } else if (breakevenEnabled && !openPos.breakevenApplied) {
-          const bestFav = currBar.high - openPos.entryPrice;
-          const ageMs = currBar.time - openPos.entryTimeMs;
-          if (bestFav >= openPos.slDist || (ageMs >= 3600 * 1000 && currBar.close >= openPos.entryPrice * 1.0015)) {
-            openPos.slPrice = openPos.entryPrice * 1.0012;
-            openPos.breakevenApplied = true;
-          }
+      const takePartialTp1 = (pos: OpenPos) => {
+        const tp1Price = isLong ? pos.entryPrice + pos.slDist * 0.85 : pos.entryPrice - pos.slDist * 0.85;
+        const partialQty = posInitialQty * 0.5;
+        const pGross = (isLong ? tp1Price - pos.entryPrice : pos.entryPrice - tp1Price) * partialQty;
+        const pFees = (pos.entryPrice + tp1Price) * partialQty * feeRate;
+        posRealizedGrossUsd += pGross;
+        posRealizedUsd += pGross - pFees;
+        posRemainingQty = posInitialQty - partialQty;
+        posPartialTaken = true;
+        pos.slPrice = pos.entryPrice * (isLong ? 1.0005 : 0.9995);
+        pos.breakevenApplied = true;
+      };
+
+      if (isLong ? currBar.low <= openPos.slPrice : currBar.high >= openPos.slPrice) {
+        exitPrice = openPos.slPrice;
+        reason = openPos.breakevenApplied ? "BREAKEVEN_LOCKED" : "SL_HIT";
+      } else if (isLong ? currBar.high >= openPos.tpPrice : currBar.low <= openPos.tpPrice) {
+        if (breakevenEnabled && !posPartialTaken) {
+          takePartialTp1(openPos);
         }
-      } else {
-        if (currBar.high >= openPos.slPrice) {
-          exitPrice = openPos.slPrice;
-          reason = openPos.breakevenApplied ? "BREAKEVEN_LOCKED" : "SL_HIT";
-        } else if (currBar.low <= openPos.tpPrice) {
-          exitPrice = openPos.tpPrice;
-          reason = "TP_HIT";
-        } else if (breakevenEnabled && !openPos.breakevenApplied) {
-          const bestFav = openPos.entryPrice - currBar.low;
-          const ageMs = currBar.time - openPos.entryTimeMs;
-          if (bestFav >= openPos.slDist || (ageMs >= 3600 * 1000 && currBar.close <= openPos.entryPrice * 0.9985)) {
-            openPos.slPrice = openPos.entryPrice * 0.9988;
-            openPos.breakevenApplied = true;
-          }
+        exitPrice = openPos.tpPrice;
+        reason = "TP_HIT";
+      } else if (breakevenEnabled && !posPartialTaken) {
+        const bestFav = isLong ? currBar.high - openPos.entryPrice : openPos.entryPrice - currBar.low;
+        if (bestFav >= openPos.slDist * 0.85) {
+          takePartialTp1(openPos);
         }
       }
 
       if (exitPrice !== null && reason !== null) {
-        const delta = openPos.type === "BUY" ? exitPrice - openPos.entryPrice : openPos.entryPrice - exitPrice;
-        const fees = (openPos.entryPrice + exitPrice) * openPos.qty * feeRate;
-        const profitUsd = Number((delta * openPos.qty - fees).toFixed(2));
-        const profitPct = Number(((profitUsd / Math.max(1, balance)) * 100).toFixed(2));
-        balance = Number((balance + profitUsd).toFixed(2));
-        if (balance > peakEquity) peakEquity = balance;
-        const dd = peakEquity > 0 ? ((peakEquity - balance) / peakEquity) * 100 : 0;
-        if (dd > maxDrawdownPct) maxDrawdownPct = dd;
-
-        const digits = inferCryptoDigits(openPos.entryPrice);
-        trades.push({
-          type: openPos.type,
-          symbol: binSym,
-          qty: openPos.qty,
-          marginUsed: openPos.marginUsed,
-          marginPct: openPos.marginPct,
-          entryPrice: rndPrice(openPos.entryPrice, digits),
-          exitPrice: rndPrice(exitPrice, digits),
-          slPrice: rndPrice(openPos.initialSlPrice, digits),
-          tpPrice: rndPrice(openPos.tpPrice, digits),
-          targetRrr: openPos.targetRrr,
-          achievedRrr: Number((delta / openPos.slDist).toFixed(2)),
-          profitUsd,
-          profitPercent: profitPct,
-          breakevenTriggered: openPos.breakevenApplied,
-          sessionLabel: openPos.sessionLabel,
-          reason,
-          entryTime: new Date(openPos.entryTimeMs).toISOString(),
-          exitTime: new Date(currBar.time).toISOString(),
-        });
-        equityCurve.push({ time: new Date(currBar.time).toISOString(), balance });
+        finalizePositionExit(openPos, exitPrice, currBar.time, reason);
         openPos = null;
         lastTradeExitBar = i;
       }
@@ -1226,6 +1274,11 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
       const sz = sizeSimCryptoPosition(entryPrice, ev.slPrice, balance, riskPercent, leverage, maxMarginPct, accountMode);
       if (sz.qty > 0) {
         const slDist = Math.abs(entryPrice - ev.slPrice);
+        posInitialQty = sz.qty;
+        posRemainingQty = sz.qty;
+        posRealizedUsd = 0;
+        posRealizedGrossUsd = 0;
+        posPartialTaken = false;
         openPos = {
           type: ev.action,
           ...sz,
@@ -1245,38 +1298,7 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
 
   if (openPos && m5Bars.length > 0) {
     const lastBar = m5Bars[m5Bars.length - 1]!;
-    const exitPrice = lastBar.close;
-    const delta = openPos.type === "BUY" ? exitPrice - openPos.entryPrice : openPos.entryPrice - exitPrice;
-    const fees = (openPos.entryPrice + exitPrice) * openPos.qty * feeRate;
-    const profitUsd = Number((delta * openPos.qty - fees).toFixed(2));
-    const profitPct = Number(((profitUsd / Math.max(1, balance)) * 100).toFixed(2));
-    balance = Number((balance + profitUsd).toFixed(2));
-    if (balance > peakEquity) peakEquity = balance;
-    const dd = peakEquity > 0 ? ((peakEquity - balance) / peakEquity) * 100 : 0;
-    if (dd > maxDrawdownPct) maxDrawdownPct = dd;
-
-    const digits = inferCryptoDigits(openPos.entryPrice);
-    trades.push({
-      type: openPos.type,
-      symbol: binSym,
-      qty: openPos.qty,
-      marginUsed: openPos.marginUsed,
-      marginPct: openPos.marginPct,
-      entryPrice: rndPrice(openPos.entryPrice, digits),
-      exitPrice: rndPrice(exitPrice, digits),
-      slPrice: rndPrice(openPos.initialSlPrice, digits),
-      tpPrice: rndPrice(openPos.tpPrice, digits),
-      targetRrr: openPos.targetRrr,
-      achievedRrr: Number((delta / openPos.slDist).toFixed(2)),
-      profitUsd,
-      profitPercent: profitPct,
-      breakevenTriggered: openPos.breakevenApplied,
-      sessionLabel: openPos.sessionLabel,
-      reason: "OPEN_END",
-      entryTime: new Date(openPos.entryTimeMs).toISOString(),
-      exitTime: new Date(lastBar.time).toISOString(),
-    });
-    equityCurve.push({ time: new Date(lastBar.time).toISOString(), balance });
+    finalizePositionExit(openPos, lastBar.close, lastBar.time, "OPEN_END");
   }
 
   const wins = trades.filter((t) => t.profitUsd > 0).length;
