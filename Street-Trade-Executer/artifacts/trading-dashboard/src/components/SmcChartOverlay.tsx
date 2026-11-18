@@ -25,17 +25,19 @@ interface SmcChartOverlayProps {
   activeZones?: Array<{ type: string; label: string; range: string }>;
   accountMode?: string;
   leverage?: number;
+  marketType?: "FUTURES" | "SPOT";
+  telemetryLoading?: boolean;
 }
 
 let tvScriptLoadingPromise: Promise<void> | null = null;
 
-function TradingViewEmbedded({ symbol }: { symbol: string }) {
+function TradingViewEmbedded({ symbol, marketType = "FUTURES" }: { symbol: string; marketType?: "FUTURES" | "SPOT" }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const mapSymbolToTV = (sym: string): string => {
     const s = sym.toUpperCase().replace(/[^A-Z0-9]/g, "");
     const clean = s.endsWith("USDT") ? s : s.endsWith("USD") ? `${s}T` : `${s}USDT`;
-    return `BINANCE:${clean}.P`;
+    return marketType === "SPOT" ? `BINANCE:${clean}` : `BINANCE:${clean}.P`;
   };
 
   const tvSymbol = mapSymbolToTV(symbol);
@@ -114,6 +116,8 @@ export function SmcChartOverlay({
   activeZones = [],
   accountMode = "PROP_FIRM",
   leverage = 5,
+  marketType = "FUTURES",
+  telemetryLoading = false,
 }: SmcChartOverlayProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState<number>(1000);
@@ -1108,13 +1112,17 @@ export function SmcChartOverlay({
         </div>
 
         {activeTab === "tv" ? (
-          <TradingViewEmbedded symbol={symbol} />
+          <TradingViewEmbedded symbol={symbol} marketType={marketType} />
         ) : (
           <div className="relative w-full h-[440px] sm:h-[475px]">
             {candles.length === 0 ? (
-              <div className="flex h-full w-full flex-col items-center justify-center gap-2 font-mono text-xs text-zinc-400">
-                <Activity className="h-5 w-5 text-cyan-400 animate-spin" />
-                <span>Fetching live Binance Futures M5 candles for {symbol} (zero mock bars)...</span>
+              <div className="flex h-full w-full flex-col items-center justify-center gap-2 font-mono text-xs text-zinc-400 px-4 text-center">
+                <Activity className={cn("h-5 w-5 text-cyan-400", telemetryLoading && "animate-spin")} />
+                <span>
+                  {telemetryLoading
+                    ? `Fetching live Binance M5 candles for ${symbol}...`
+                    : `Waiting for live Binance M5 bars for ${symbol} — try TradingView Live tab or reselect coin.`}
+                </span>
               </div>
             ) : (
               <>

@@ -37,13 +37,28 @@ import {
 } from "lucide-react";
 import { AreaChart, Area, ResponsiveContainer } from "recharts";
 
+function hasTelemetryCandles(t: any): boolean {
+  if (!t) return false;
+  if (Array.isArray(t.candles) && t.candles.length >= 8) return true;
+  try {
+    const raw = t.fvg_bounds_json ?? t.fvgBoundsJson;
+    if (!raw) return false;
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return Array.isArray(parsed?.candles) && parsed.candles.length >= 8;
+  } catch {
+    return false;
+  }
+}
+
 export default function Dashboard() {
   const { toast } = useToast();
   const isReadOnly = localStorage.getItem("wasee_role")?.toLowerCase() === "user";
   const queryClient = useQueryClient();
 
-  const [selectedChartSymbol, setSelectedChartSymbol] = useState("BTCUSDT");
-  const [manualSymbol, setManualSymbol] = useState("BTCUSDT");
+  const initialQuerySym =
+    typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("symbol")?.trim().toUpperCase() : "";
+  const [selectedChartSymbol, setSelectedChartSymbol] = useState(initialQuerySym || "BTCUSDT");
+  const [manualSymbol, setManualSymbol] = useState(initialQuerySym || "BTCUSDT");
   const [manualLots, setManualLots] = useState("0.01");
   const [manualSlPct, setManualSlPct] = useState("1.2");
   const [manualTpPct, setManualTpPct] = useState("2.4");
@@ -69,7 +84,7 @@ export default function Dashboard() {
   useEffect(() => {
     if (config?.slPips) setManualSlPct(String(config.slPips));
     if (config?.tpPips) setManualTpPct(String(config.tpPips));
-    if (config?.activePair && selectedChartSymbol === "BTCUSDT") {
+    if (!initialQuerySym && config?.activePair && selectedChartSymbol === "BTCUSDT") {
       setSelectedChartSymbol(String(config.activePair).split("/")[0] || "BTCUSDT");
     }
   }, [config?.activePair]);
@@ -78,10 +93,8 @@ export default function Dashboard() {
     setManualSymbol(selectedChartSymbol);
   }, [selectedChartSymbol]);
 
-  const dbTelemetryForCoin = dashboard?.smcTelemetryAll?.[selectedChartSymbol.toUpperCase()];
-
-  // Fetch live Binance SMC telemetry on demand whenever viewing ANY searched Binance coin
-  const { data: onDemandSmc } = useQuery({
+  // Fetch live Binance SMC telemetry on demand whenever viewing ANY searched or favorited Binance coin
+  const { data: onDemandSmc, isFetching: onDemandLoading } = useQuery({
     queryKey: ["smc-telemetry-live", selectedChartSymbol],
     queryFn: async () => {
       const res = await fetch(getApiUrl(`/api/smc_telemetry?symbol=${encodeURIComponent(selectedChartSymbol)}`));
@@ -91,6 +104,11 @@ export default function Dashboard() {
     refetchInterval: 4000,
     enabled: Boolean(selectedChartSymbol),
   });
+
+  const resolvedChartSymbol = String(onDemandSmc?.resolvedSymbol || selectedChartSymbol).toUpperCase();
+  const dbTelemetryForCoin =
+    dashboard?.smcTelemetryAll?.[selectedChartSymbol.toUpperCase()] ??
+    dashboard?.smcTelemetryAll?.[resolvedChartSymbol];
 
   if (isLoading && !dashboard) {
     return (
@@ -135,17 +153,45 @@ export default function Dashboard() {
   const overallGain = equity > 0 ? equity - baseInitial : 0;
   const overallGainPct = baseInitial > 0 ? (overallGain / baseInitial) * 100 : 0;
 
-  const effectiveTelemetry = dbTelemetryForCoin ?? onDemandSmc?.telemetry ?? dashboard.smcTelemetry ?? null;
-  const scannedMatch = scannedAssets.find((a: any) => String(a.symbolPair).toUpperCase() === selectedChartSymbol.toUpperCase());
-  const liveTickerPrice = Number(dashboard?.livePrices?.[selectedChartSymbol.toUpperCase()] ?? 0);
+  const favoritePairs: string[] = Array.isArray(dashboard?.favoritePairs)
+    ? dashboard.favoritePairs.map((s: any) => String(s).toUpperCase())
+    : [];
+
+  const liveHasCandles = hasTelemetryCandles(onDemandSmc?.telemetry);
+  const dbHasCandles = hasTelemetryCandles(dbTelemetryForCoin);
+  const effectiveTelemetry = liveHasCandles
+    ? onDemandSmc.telemetry
+    : dbHasCandles
+    ? dbTelemetryForCoin
+    : onDemandSmc?.telemetry ??
+      dbTelemetryForCoin ??
+      (resolvedChartSymbol === String(currentPair).toUpperCase() ? dashboard.smcTelemetry : null) ??
+      null;
+
+  const scannedMatch = scannedAssets.find(
+    (a: any) =>
+      String(a.symbolPair).toUpperCase() === selectedChartSymbol.toUpperCase() ||
+      String(a.symbolPair).toUpperCase() === resolvedChartSymbol
+  );
+  const liveTickerPrice = Number(
+    dashboard?.livePrices?.[resolvedChartSymbol] ??
+      dashboard?.livePrices?.[selectedChartSymbol.toUpperCase()] ??
+      0
+  );
   const currentLivePrice = Number(liveTickerPrice || onDemandSmc?.livePrice || scannedMatch?.priceA || 0);
 
   const matchingPosition = activePositions.find(
-    (p: any) => String(p.symbol).toUpperCase() === selectedChartSymbol.toUpperCase()
+    (p: any) =>
+      String(p.symbol).toUpperCase() === resolvedChartSymbol ||
+      String(p.symbol).toUpperCase() === selectedChartSymbol.toUpperCase()
   );
 
   // Merge live Binance zones first (matching visible M5 candles) with DB zones fallback
-  const dbSymbolZones = activeZones.filter((z: any) => String(z.label).toUpperCase().includes(selectedChartSymbol.toUpperCase()));
+  const dbSymbolZones = activeZones.filter(
+    (z: any) =>
+      String(z.label).toUpperCase().includes(resolvedChartSymbol) ||
+      String(z.label).toUpperCase().includes(selectedChartSymbol.toUpperCase())
+  );
   const chartZones = onDemandSmc?.activeZones?.length ? onDemandSmc.activeZones : dbSymbolZones;
 
   const handleToggleBot = async () => {
@@ -161,7 +207,7 @@ export default function Dashboard() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       toast({
         title: nextAction === "START" ? "Crypto SMC Bot STARTED 🟢" : "Crypto SMC Bot PAUSED ⏸️",
-        description: nextAction === "START" ? "Scanning Top 10 Binance Futures pairs live." : "New entries paused; open SL/TP remains active.",
+        description: nextAction === "START" ? "Scanning Top 10 & Favorite Binance pairs live." : "New entries paused; open SL/TP remains active.",
       });
       await queryClient.invalidateQueries({ queryKey: getGetDashboardQueryKey() });
     } catch {
@@ -177,13 +223,39 @@ export default function Dashboard() {
       const res = await fetch(getApiUrl("/api/config"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ activePair: selectedChartSymbol }),
+        body: JSON.stringify({ activePair: resolvedChartSymbol }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      toast({ title: "Priority Coin Pinned", description: `${selectedChartSymbol} added to active Binance bot scanner.` });
+      toast({ title: "Priority Coin Pinned", description: `${resolvedChartSymbol} set as priority Binance bot coin.` });
       await queryClient.invalidateQueries({ queryKey: getGetDashboardQueryKey() });
     } catch {
       toast({ title: "Could not pin symbol", variant: "destructive" });
+    }
+  };
+
+  const handleToggleFavorite = async (symToToggle: string) => {
+    if (isReadOnly) return;
+    try {
+      const res = await fetch(getApiUrl("/api/favorites/toggle"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: symToToggle }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      toast({
+        title: json.action === "added" ? `★ ${json.symbol} Added to Favorites` : `${json.symbol} Removed from Favorites`,
+        description:
+          json.action === "added"
+            ? "Added to Favorites Watchlist, Live Scanner & Pure SMC Chart."
+            : "Removed from Favorites Watchlist.",
+      });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: getGetDashboardQueryKey() }),
+        queryClient.invalidateQueries({ queryKey: ["smc-telemetry-live"] }),
+      ]);
+    } catch {
+      toast({ title: "Could not update favorite", variant: "destructive" });
     }
   };
 
@@ -402,35 +474,55 @@ export default function Dashboard() {
           </Card>
         </div>
 
-        {/* BINANCE COIN SELECTOR (TOP 10 + SEARCH ANY BINANCE COIN) */}
+        {/* BINANCE COIN SELECTOR (TOP 10 + FAVORITES WATCHLIST + SEARCH ANY BINANCE COIN) */}
         <Card className="bg-zinc-900/70 border-zinc-800 p-3.5 sm:p-4 space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-zinc-300">
-              <span>Chart Inspection: <strong className="text-sky-400">{selectedChartSymbol}</strong> <span className="text-zinc-500">(View only — clicking coins never places trades)</span></span>
+              <span>Chart Inspection: <strong className="text-sky-400">{resolvedChartSymbol}</strong> <span className="text-zinc-500">(View only — clicking coins never places trades)</span></span>
               <span className="text-zinc-600">|</span>
-              <span>Pinned Bot Priority: <strong className="text-emerald-400">{currentPair}</strong></span>
-              {selectedChartSymbol !== currentPair && !isReadOnly && (
+              <span>Pinned Priority: <strong className="text-emerald-400">{currentPair}</strong></span>
+              {!isReadOnly && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void handleToggleFavorite(resolvedChartSymbol)}
+                  className={cn(
+                    "h-6 px-2 text-[10px] font-mono",
+                    favoritePairs.includes(resolvedChartSymbol)
+                      ? "border-amber-400/60 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25"
+                      : "border-zinc-700 text-zinc-300 hover:border-amber-400/50 hover:text-amber-300"
+                  )}
+                >
+                  <Star className={cn("w-3 h-3 mr-1", favoritePairs.includes(resolvedChartSymbol) && "fill-amber-400 text-amber-400")} />
+                  {favoritePairs.includes(resolvedChartSymbol) ? `Favorited (${resolvedChartSymbol})` : `Add ${resolvedChartSymbol} to Favorites`}
+                </Button>
+              )}
+              {resolvedChartSymbol !== currentPair && !isReadOnly && (
                 <Button size="sm" variant="outline" onClick={handlePinCustomSymbol} className="h-6 px-2 text-[10px] font-mono border-indigo-500/40 text-indigo-300 hover:bg-indigo-500/10">
-                  <Star className="w-3 h-3 mr-1" /> Pin {selectedChartSymbol} to Scanner
+                  <Zap className="w-3 h-3 mr-1" /> Set {resolvedChartSymbol} Priority
                 </Button>
               )}
             </div>
           </div>
           <BinanceCoinSearch
-            selectedSymbol={selectedChartSymbol}
+            selectedSymbol={resolvedChartSymbol}
             onSelectSymbol={(sym) => setSelectedChartSymbol(sym)}
+            favoriteSymbols={favoritePairs}
+            onToggleFavorite={(sym) => void handleToggleFavorite(sym)}
           />
         </Card>
 
         {/* FULL PURE SMC LIVE CHART & 9-STEP HUD */}
         <SmcChartOverlay
-          symbol={selectedChartSymbol}
+          symbol={resolvedChartSymbol}
           telemetry={effectiveTelemetry}
           currentPrice={currentLivePrice}
           activePosition={matchingPosition}
           activeZones={chartZones}
           accountMode={accountMode}
           leverage={leverage}
+          marketType={onDemandSmc?.marketType ?? "FUTURES"}
+          telemetryLoading={onDemandLoading && !liveHasCandles && !dbHasCandles}
         />
 
         {/* OPTIONAL SESSION TIME GUARD (DEFAULT OFF = 24/7) */}
@@ -578,12 +670,12 @@ export default function Dashboard() {
           </Card>
         </div>
 
-        {/* 10 COINS LIVE PURE SMC AUTO-SCANNER TABLE (ZERO Z-SCORE!) */}
+        {/* TOP 10 + FAVORITE COINS LIVE PURE SMC AUTO-SCANNER TABLE (ZERO Z-SCORE!) */}
         <Card className="bg-card border-border border-t-2 border-t-blue-500/70">
           <CardHeader className="pb-2 flex flex-row items-center justify-between">
             <div>
               <CardTitle className="text-xs text-muted-foreground uppercase tracking-wider font-mono">
-                Top 10 Crypto Futures Pure SMC Live Scanner
+                Top 10 &amp; Favorite Coins Pure SMC Live Scanner
               </CardTitle>
               <p className="text-xs text-muted-foreground mt-0.5">
                 Click any coin row to load its M5 candles, FVG, iFVG, OB, Breaker, SL, TP &amp; S1–S9 Pipeline
@@ -614,7 +706,9 @@ export default function Dashboard() {
                   <TableBody>
                     {scannedAssets.map((a: any) => {
                       const sym = String(a.symbolPair);
-                      const isSelected = sym.toUpperCase() === selectedChartSymbol.toUpperCase();
+                      const symU = sym.toUpperCase();
+                      const isSelected = symU === selectedChartSymbol.toUpperCase() || symU === resolvedChartSymbol;
+                      const isFav = favoritePairs.includes(symU);
                       const act = String(a.action || "NEUTRAL");
                       return (
                         <TableRow
@@ -625,7 +719,32 @@ export default function Dashboard() {
                             isSelected ? "bg-indigo-500/10 hover:bg-indigo-500/15" : "hover:bg-muted/30"
                           )}
                         >
-                          <TableCell className="font-mono font-bold text-xs">{sym}</TableCell>
+                          <TableCell className="font-mono font-bold text-xs">
+                            <div className="flex items-center gap-1.5">
+                              {!isReadOnly && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void handleToggleFavorite(sym);
+                                  }}
+                                  className={cn(
+                                    "p-0.5 rounded hover:bg-zinc-800",
+                                    isFav ? "text-amber-400" : "text-zinc-600 hover:text-amber-300"
+                                  )}
+                                  title={isFav ? "Remove from Favorites" : "Add to Favorites"}
+                                >
+                                  <Star className={cn("w-3.5 h-3.5", isFav && "fill-amber-400")} />
+                                </button>
+                              )}
+                              <span>{sym}</span>
+                              {isFav && (
+                                <Badge variant="outline" className="text-[9px] px-1 py-0 bg-amber-500/10 text-amber-300 border-amber-500/30">
+                                  FAV
+                                </Badge>
+                              )}
+                            </div>
+                          </TableCell>
                           <TableCell className="font-mono text-xs text-right">${formatCryptoPrice(a.priceA)}</TableCell>
                           <TableCell className="font-mono text-xs text-right text-emerald-400">${formatCryptoPrice(a.priceB)}</TableCell>
                           <TableCell className="font-mono text-xs text-right">

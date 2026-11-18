@@ -21,30 +21,48 @@ export async function fetchLivePriceMap(): Promise<Record<string, number>> {
     return livePriceMapCache.map;
   }
   const isTestnet = ["true", "1", "yes"].includes((process.env.USE_BINANCE_TESTNET || "").trim().toLowerCase());
-  const endpoints = isTestnet
+  const futEndpoints = isTestnet
     ? ["https://testnet.binancefuture.com/fapi/v1/ticker/price", "https://fapi.binance.com/fapi/v1/ticker/price"]
     : ["https://fapi.binance.com/fapi/v1/ticker/price", "https://testnet.binancefuture.com/fapi/v1/ticker/price"];
 
-  for (const url of endpoints) {
+  const nextMap: Record<string, number> = {};
+  for (const url of futEndpoints) {
     try {
       const resp = await fetch(url, { signal: AbortSignal.timeout(3500) });
       if (!resp.ok) continue;
       const arr = (await resp.json()) as Array<{ symbol: string; price: string }>;
       if (!Array.isArray(arr) || arr.length === 0) continue;
-      const nextMap: Record<string, number> = {};
       for (const item of arr) {
         const p = parseFloat(item.price);
-        if (item.symbol && p > 0) {
-          nextMap[item.symbol.toUpperCase()] = p;
+        const symU = item.symbol?.toUpperCase();
+        if (symU && p > 0 && nextMap[symU] === undefined) {
+          nextMap[symU] = p;
         }
       }
-      if (Object.keys(nextMap).length > 0) {
-        livePriceMapCache = { ts: Date.now(), map: nextMap };
-        return nextMap;
-      }
+      if (!isTestnet && Object.keys(nextMap).length > 0) break;
     } catch {
       // try next endpoint
     }
+  }
+
+  // Supplement missing Mainnet/Spot USDT tickers cleanly from non-geo-blocked Binance Vision CDN
+  try {
+    const resp = await fetch("https://data-api.binance.vision/api/v3/ticker/price", { signal: AbortSignal.timeout(4000) });
+    if (resp.ok) {
+      const arr = (await resp.json()) as Array<{ symbol: string; price: string }>;
+      for (const item of arr) {
+        const symU = item.symbol?.toUpperCase();
+        const p = parseFloat(item.price);
+        if (symU && symU.endsWith("USDT") && p > 0 && nextMap[symU] === undefined) {
+          nextMap[symU] = p;
+        }
+      }
+    }
+  } catch {}
+
+  if (Object.keys(nextMap).length > 0) {
+    livePriceMapCache = { ts: Date.now(), map: nextMap };
+    return nextMap;
   }
   return livePriceMapCache.map;
 }
@@ -54,6 +72,10 @@ async function fetchBinanceFuturesPrices(): Promise<PriceRow[]> {
   const endpoints = isTestnet
     ? ["https://testnet.binancefuture.com/fapi/v1/ticker/24hr", "https://fapi.binance.com/fapi/v1/ticker/24hr"]
     : ["https://fapi.binance.com/fapi/v1/ticker/24hr"];
+
+  const nowStr = new Date().toISOString();
+  const topRank = new Map(TOP_10_CRYPTO_COINS.map((sym, idx) => [sym, idx]));
+  const bySym = new Map<string, PriceRow>();
 
   for (const url of endpoints) {
     try {
@@ -66,14 +88,11 @@ async function fetchBinanceFuturesPrices(): Promise<PriceRow[]> {
         priceChangePercent: string;
         quoteVolume?: string;
       }>;
-      const nowStr = new Date().toISOString();
-      const topRank = new Map(TOP_10_CRYPTO_COINS.map((sym, idx) => [sym, idx]));
-      const list: PriceRow[] = [];
       for (const item of data) {
-        if (!item.symbol.endsWith("USDT")) continue;
+        if (!item.symbol?.endsWith("USDT")) continue;
         const price = parseFloat(item.lastPrice) || 0;
-        if (price <= 0) continue;
-        list.push({
+        if (price <= 0 || bySym.has(item.symbol)) continue;
+        bySym.set(item.symbol, {
           symbol: item.symbol,
           price,
           change24h: parseFloat(item.priceChange) || 0,
@@ -84,20 +103,48 @@ async function fetchBinanceFuturesPrices(): Promise<PriceRow[]> {
           updatedAt: nowStr,
         });
       }
-      if (list.length > 0) {
-        list.sort((a, b) => {
-          const ra = topRank.has(a.symbol) ? topRank.get(a.symbol)! : 9999;
-          const rb = topRank.has(b.symbol) ? topRank.get(b.symbol)! : 9999;
-          if (ra !== rb) return ra - rb;
-          return b.quoteVolume - a.quoteVolume;
-        });
-        return list;
-      }
     } catch {
       // fallback to next endpoint
     }
   }
-  return [];
+
+  // Merge non-geo-blocked Spot 24hr tickers for coins missing on active Futures feed (e.g. ZKCUSDT on US cloud)
+  try {
+    const resp = await fetch("https://data-api.binance.vision/api/v3/ticker/24hr", { signal: AbortSignal.timeout(6000) });
+    if (resp.ok) {
+      const data = (await resp.json()) as Array<{
+        symbol: string;
+        lastPrice: string;
+        priceChange: string;
+        priceChangePercent: string;
+        quoteVolume?: string;
+      }>;
+      for (const item of data) {
+        if (!item.symbol?.endsWith("USDT") || bySym.has(item.symbol)) continue;
+        const price = parseFloat(item.lastPrice) || 0;
+        if (price <= 0) continue;
+        bySym.set(item.symbol, {
+          symbol: item.symbol,
+          price,
+          change24h: parseFloat(item.priceChange) || 0,
+          changePct24h: parseFloat(item.priceChangePercent) || 0,
+          quoteVolume: parseFloat(item.quoteVolume || "0") || 0,
+          category: "crypto",
+          source: "Binance Spot",
+          updatedAt: nowStr,
+        });
+      }
+    }
+  } catch {}
+
+  const list = Array.from(bySym.values());
+  list.sort((a, b) => {
+    const ra = topRank.has(a.symbol) ? topRank.get(a.symbol)! : 9999;
+    const rb = topRank.has(b.symbol) ? topRank.get(b.symbol)! : 9999;
+    if (ra !== rb) return ra - rb;
+    return b.quoteVolume - a.quoteVolume;
+  });
+  return list;
 }
 
 router.get("/prices", async (req, res) => {

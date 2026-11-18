@@ -3,10 +3,10 @@ import { db } from "@workspace/db";
 import { botStateTable } from "@workspace/db";
 import { UpdateConfigBody } from "@workspace/api-zod";
 import { sql } from "drizzle-orm";
-import { resolveBinanceSymbol } from "../lib/smcEngine";
+import { resolveBinanceSymbol, parseFavoritePairs } from "../lib/smcEngine";
 import { getCryptoDiscordWebhookUrl, sendDiscordCryptoSignalAlert } from "../lib/discord";
-import { syncLeverageAcrossCoins } from "../lib/cryptoBotWorker";
-import { fetchBinanceKlines } from "./binance";
+import { evaluateAndPersistSymbolSmc, syncLeverageAcrossCoins } from "../lib/cryptoBotWorker";
+import { fetchBinanceKlines, resolveLiveBinanceSymbol, TOP_10_CRYPTO_COINS } from "./binance";
 
 const router = Router();
 
@@ -61,6 +61,7 @@ function serializeConfig(state: any) {
     session2StartHour: Number(state?.session2StartHour ?? 18.0),
     session2EndHour: Number(state?.session2EndHour ?? 22.0),
     isBotRunning: Boolean(state?.isBotRunning ?? true),
+    favoritePairs: parseFavoritePairs(state?.favoritePairs),
   };
 }
 
@@ -82,7 +83,7 @@ router.post("/config", async (req, res) => {
     }
 
     const d = parsed.data;
-    const activeSym = resolveBinanceSymbol(d.activePair);
+    const activeSym = await resolveLiveBinanceSymbol(d.activePair);
     const currRow = (await db.select().from(botStateTable).limit(1))[0];
 
     const accMode = (d.accountMode ?? (currRow?.accountMode as "PROP_FIRM" | "PERSONAL") ?? "PROP_FIRM").toUpperCase();
@@ -196,10 +197,69 @@ router.post("/config", async (req, res) => {
 
     const updated = (await db.select().from(botStateTable).limit(1))[0];
     void syncLeverageAcrossCoins(leverage, activeSym);
+    await evaluateAndPersistSymbolSmc(activeSym, maxSlPct, leverage);
     return res.json(serializeConfig(updated));
   } catch (err) {
     req.log.error({ err }, "Failed to update config");
     return res.status(500).json({ error: "Failed to update config" });
+  }
+});
+
+router.get("/favorites", async (_req, res) => {
+  try {
+    const row = (await db.select().from(botStateTable).limit(1))[0] as any;
+    return res.json({ favoritePairs: parseFavoritePairs(row?.favoritePairs) });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to load favorites" });
+  }
+});
+
+router.post("/favorites/toggle", async (req, res) => {
+  try {
+    const rawSym = String(req.body?.symbol ?? "").trim();
+    if (!rawSym) return res.status(400).json({ error: "Symbol required" });
+    const sym = await resolveLiveBinanceSymbol(rawSym);
+    const row = (await db.select().from(botStateTable).limit(1))[0] as any;
+    const currentFavs = parseFavoritePairs(row?.favoritePairs);
+    const exists = currentFavs.includes(sym);
+    const forceMode = String(req.body?.mode ?? "").toLowerCase();
+    const shouldAdd = forceMode === "add" ? true : forceMode === "remove" ? false : !exists;
+
+    let nextFavs: string[];
+    if (shouldAdd) {
+      nextFavs = currentFavs.includes(sym) ? currentFavs : [...currentFavs, sym].slice(-25);
+    } else {
+      nextFavs = currentFavs.filter((f) => f !== sym);
+    }
+
+    await db.execute(
+      sql`UPDATE bot_state SET favorite_pairs = ${JSON.stringify(nextFavs)}, updated_at = NOW() WHERE id = (SELECT MIN(id) FROM bot_state)`
+    );
+
+    const maxSlPct = Number(row?.maxSlPct ?? 1.2);
+    const leverage = Number(row?.leverage ?? 5);
+    const activeSym = await resolveLiveBinanceSymbol(String(row?.activePair ?? "BTCUSDT"));
+
+    let evalOut: any = null;
+    if (shouldAdd) {
+      const persisted = await evaluateAndPersistSymbolSmc(sym, maxSlPct, leverage);
+      evalOut = persisted?.evalRes ?? null;
+    } else if (!TOP_10_CRYPTO_COINS.includes(sym) && sym !== activeSym) {
+      await db.execute(sql`DELETE FROM scanned_assets WHERE UPPER(symbol_pair) = ${sym.toUpperCase()}`);
+    }
+
+    return res.json({
+      status: "ok",
+      action: shouldAdd ? "added" : "removed",
+      symbol: sym,
+      favoritePairs: nextFavs,
+      telemetry: evalOut?.telemetry ?? null,
+      activeZones: evalOut?.activeZones ?? [],
+      livePrice: evalOut?.livePrice ?? 0,
+    });
+  } catch (err) {
+    req.log.error({ err }, "Failed to toggle favorite symbol");
+    return res.status(500).json({ error: "Failed to toggle favorite coin" });
   }
 });
 

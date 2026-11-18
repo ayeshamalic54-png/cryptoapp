@@ -10,7 +10,7 @@ import {
 } from "@workspace/db";
 import { desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
-import { formatCryptoPrice, resolveBinanceSymbol } from "./smcEngine";
+import { formatCryptoPrice, parseFavoritePairs, resolveBinanceSymbol } from "./smcEngine";
 import { fetchLivePriceMap } from "../routes/prices";
 
 let wss: WebSocketServer | null = null;
@@ -140,6 +140,7 @@ async function buildDashboardPayload() {
   return {
     systemStatus: botState?.systemStatus ?? "BOT OFFLINE",
     currentPair: activeSym,
+    favoritePairs: parseFavoritePairs((botState as any)?.favoritePairs),
     lastUpdate: botState?.updatedAt?.toISOString() ?? null,
     equity: Number(botState?.equity ?? 0),
     drawdownPercent: Number(botState?.drawdownPercent ?? 0),

@@ -91,6 +91,37 @@ export function resolveBinanceSymbol(rawSymbol: string): string {
   return cleaned.endsWith("USDT") ? cleaned : `${cleaned}USDT`;
 }
 
+/** Parses stored JSON/comma list of favorited Binance USDT-M symbols safely (unique uppercase, max 25). */
+export function parseFavoritePairs(raw: unknown): string[] {
+  let list: unknown[] = [];
+  if (Array.isArray(raw)) {
+    list = raw;
+  } else if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) list = parsed;
+      } catch {}
+    } else if (trimmed.length > 0) {
+      list = trimmed.split(",");
+    }
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of list) {
+    const s = String(item || "").trim();
+    if (!s) continue;
+    const norm = resolveBinanceSymbol(s);
+    if (!seen.has(norm)) {
+      seen.add(norm);
+      out.push(norm);
+    }
+    if (out.length >= 25) break;
+  }
+  return out;
+}
+
 function rndPrice(val: number, digits: number): number {
   const f = Math.pow(10, Math.min(8, Math.max(2, digits)));
   return Math.round(val * f) / f;

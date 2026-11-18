@@ -8,8 +8,8 @@ import {
   smcTelemetryTable,
 } from "@workspace/db";
 import { desc, eq } from "drizzle-orm";
-import { analyzeLiveSmcTelemetry, formatCryptoPrice, resolveBinanceSymbol } from "../lib/smcEngine";
-import { fetchBinanceKlines, resolveLiveBinanceSymbol } from "./binance";
+import { analyzeLiveSmcTelemetry, formatCryptoPrice, parseFavoritePairs, resolveBinanceSymbol } from "../lib/smcEngine";
+import { fetchBinanceKlinesWithMeta, getSymbolMarketType, resolveLiveBinanceSymbol } from "./binance";
 import { fetchLivePriceMap } from "./prices";
 
 const router = Router();
@@ -43,6 +43,15 @@ function formatTelemetryRow(row: any) {
     action: row.action ?? "NONE",
     updatedAt: row.updatedAt?.toISOString?.() ?? new Date().toISOString(),
   };
+}
+
+function hasCandlesInTelemetry(rawJson: unknown): boolean {
+  try {
+    const parsed = typeof rawJson === "string" ? JSON.parse(rawJson) : rawJson;
+    return Array.isArray((parsed as any)?.candles) && (parsed as any).candles.length >= 8;
+  } catch {
+    return false;
+  }
 }
 
 router.get("/dashboard", async (req, res) => {
@@ -130,6 +139,7 @@ router.get("/dashboard", async (req, res) => {
     return res.json({
       systemStatus: botState?.systemStatus ?? "BOT OFFLINE",
       currentPair: activeSym,
+      favoritePairs: parseFavoritePairs((botState as any)?.favoritePairs),
       lastUpdate: botState?.updatedAt?.toISOString() ?? null,
       equity: Number(botState?.equity ?? 0),
       drawdownPercent: Number(botState?.drawdownPercent ?? 0),
@@ -208,7 +218,41 @@ router.get("/smc_telemetry", async (req, res) => {
       const dbMatch = rows.find((r) => String(r.symbol).toUpperCase() === requestedSym || String(r.symbol).toUpperCase() === resolvedSym);
       const ageMs = dbMatch?.updatedAt ? Date.now() - new Date(dbMatch.updatedAt).getTime() : Infinity;
       const liveTicker = livePriceMap[resolvedSym] ?? livePriceMap[requestedSym] ?? 0;
-      if (dbMatch && ageMs < 45_000) {
+      const dbHasCandles = dbMatch ? hasCandlesInTelemetry(dbMatch.fvgBoundsJson) : false;
+
+      if (dbMatch && ageMs < 45_000 && dbHasCandles) {
+        const [dbZones, marketType] = await Promise.all([
+          db
+            .select()
+            .from(fvgZonesTable)
+            .where(eq(fvgZonesTable.symbol, dbMatch.symbol)),
+          getSymbolMarketType(resolvedSym),
+        ]);
+        const mappedZones = dbZones.map((z) => {
+          const meta = ZONE_META[z.zoneType] ?? { label: z.zoneType.toUpperCase(), bullish: true };
+          const dir = meta.bullish ? "BULLISH" : "BEARISH";
+          return {
+            type: `${dir}_${meta.label}`,
+            label: `${meta.bullish ? "🟢" : "🔴"} ${meta.label} - ${z.symbol}`,
+            range: `${formatCryptoPrice(Number(z.lowPrice))}-${formatCryptoPrice(Number(z.highPrice))}`,
+          };
+        });
+        return res.json({
+          telemetry: formatTelemetryRow(dbMatch),
+          activeZones: mappedZones,
+          livePrice: liveTicker || undefined,
+          resolvedSymbol: dbMatch.symbol,
+          marketType,
+          source: "db",
+        });
+      }
+
+      // On-demand live Binance SMC computation (Futures Testnet/Mainnet + Vision CDN fallback)
+      const [m5Res, m15Res] = await Promise.all([
+        fetchBinanceKlinesWithMeta(resolvedSym, "5m", 100),
+        fetchBinanceKlinesWithMeta(resolvedSym, "15m", 80),
+      ]);
+      if (m5Res.bars.length === 0 && dbMatch && dbHasCandles) {
         const dbZones = await db
           .select()
           .from(fvgZonesTable)
@@ -226,19 +270,17 @@ router.get("/smc_telemetry", async (req, res) => {
           telemetry: formatTelemetryRow(dbMatch),
           activeZones: mappedZones,
           livePrice: liveTicker || undefined,
-          source: "db",
+          resolvedSymbol: dbMatch.symbol,
+          marketType: m5Res.marketType,
+          source: "db_fallback",
         });
       }
-      // On-demand live Binance SMC computation for ANY searched Binance coin!
-      const [m5, m15] = await Promise.all([
-        fetchBinanceKlines(resolvedSym, "5m", 100),
-        fetchBinanceKlines(resolvedSym, "15m", 80),
-      ]);
+
       const botRow = (await db.select().from(botStateTable).limit(1))[0];
       const live = analyzeLiveSmcTelemetry(
-        resolvedSym,
-        m5,
-        m15,
+        m5Res.resolvedSymbol,
+        m5Res.bars,
+        m15Res.bars,
         Number(botRow?.maxSlPct ?? 1.2),
         Number(botRow?.leverage ?? 5)
       );
@@ -246,6 +288,8 @@ router.get("/smc_telemetry", async (req, res) => {
         telemetry: live.telemetry,
         activeZones: live.activeZones,
         livePrice: liveTicker || live.livePrice,
+        resolvedSymbol: m5Res.resolvedSymbol,
+        marketType: m5Res.marketType,
         source: "binance_live",
       });
     }

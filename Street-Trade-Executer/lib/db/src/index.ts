@@ -65,6 +65,7 @@ export const botStateTable = pgTable("bot_state", {
   session2EndHour: numeric("session2_end_hour", { precision: 4, scale: 2 }).default("22.00"),
   isBotRunning: boolean("is_bot_running").default(true),
   metricsResetAt: timestamp("metrics_reset_at"),
+  favoritePairs: text("favorite_pairs").default("[]"),
 });
 
 export const tradesTable = pgTable("trades", {

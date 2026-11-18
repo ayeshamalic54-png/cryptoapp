@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -7,11 +8,46 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn, formatCryptoPrice } from "@/lib/utils";
 import { getApiUrl } from "@/lib/api";
 import { TOP_10_CRYPTO_COINS } from "@/components/BinanceCoinSearch";
-import { TrendingUp, TrendingDown, Search } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
+import { TrendingUp, TrendingDown, Search, Star } from "lucide-react";
 
 export default function Markets() {
   const [search, setSearch] = useState("");
+  const [, navigate] = useLocation();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
   const topSet = new Set(TOP_10_CRYPTO_COINS);
+
+  const { data: favData } = useQuery<{ favoritePairs: string[] }>({
+    queryKey: ["favorites-list"],
+    queryFn: async () => {
+      const res = await fetch(getApiUrl("/api/favorites"));
+      if (!res.ok) return { favoritePairs: [] };
+      return res.json();
+    },
+    refetchInterval: 8000,
+  });
+  const favSet = new Set((favData?.favoritePairs ?? []).map((s) => s.toUpperCase()));
+
+  const handleToggleFav = async (e: React.MouseEvent, sym: string) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(getApiUrl("/api/favorites/toggle"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: sym }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      toast({
+        title: json.action === "added" ? `★ ${json.symbol} Added to Favorites` : `${json.symbol} Removed from Favorites`,
+        description: json.action === "added" ? "Live M15+M5 SMC scanner & chart activated." : "Updated scanner watchlist.",
+      });
+      await queryClient.invalidateQueries({ queryKey: ["favorites-list"] });
+    } catch {
+      toast({ title: "Failed to update favorite", variant: "destructive" });
+    }
+  };
 
   const { data: prices, isLoading, dataUpdatedAt } = useQuery<any[]>({
     queryKey: ["binance-futures-markets", search],
@@ -62,14 +98,35 @@ export default function Markets() {
             const up = pct > 0;
             const down = pct < 0;
             const isTop = topSet.has(p.symbol);
+            const isFav = favSet.has(p.symbol.toUpperCase());
             return (
-              <Card key={p.symbol} className={cn("bg-card border-border", isTop && "border-emerald-500/30")}>
+              <Card
+                key={p.symbol}
+                onClick={() => navigate(`/?symbol=${encodeURIComponent(p.symbol)}`)}
+                className={cn(
+                  "bg-card border-border cursor-pointer transition-colors hover:border-indigo-500/60",
+                  isFav ? "border-amber-500/50" : isTop && "border-emerald-500/30"
+                )}
+              >
                 <CardContent className="p-3 space-y-2">
                   <div className="flex items-start justify-between gap-1">
                     <span className="font-mono font-bold text-sm">{p.symbol}</span>
-                    <Badge variant="outline" className={cn("text-[9px] font-mono", isTop ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" : "bg-yellow-500/10 text-yellow-400 border-yellow-500/20")}>
-                      {isTop ? "TOP 10" : p.source}
-                    </Badge>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={(e) => void handleToggleFav(e, p.symbol)}
+                        className={cn(
+                          "p-0.5 rounded hover:bg-zinc-800 transition-colors",
+                          isFav ? "text-amber-400" : "text-zinc-500 hover:text-amber-300"
+                        )}
+                        title={isFav ? "Remove from Favorites" : "Add to Favorites & Live Scanner"}
+                      >
+                        <Star className={cn("h-3.5 w-3.5", isFav && "fill-amber-400")} />
+                      </button>
+                      <Badge variant="outline" className={cn("text-[9px] font-mono", isTop ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" : "bg-yellow-500/10 text-yellow-400 border-yellow-500/20")}>
+                        {isTop ? "TOP 10" : p.source}
+                      </Badge>
+                    </div>
                   </div>
                   <div className={cn("text-lg font-mono font-bold", up ? "text-emerald-400" : down ? "text-rose-400" : "text-foreground")}>
                     ${formatCryptoPrice(p.price)}

@@ -55,6 +55,7 @@ export async function initDb(): Promise<void> {
     `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS knife_protection_enabled BOOLEAN DEFAULT FALSE`,
     `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS obi_enabled BOOLEAN DEFAULT FALSE`,
     `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS volatility_filter_enabled BOOLEAN DEFAULT FALSE`,
+    `ALTER TABLE bot_state ADD COLUMN IF NOT EXISTS favorite_pairs TEXT DEFAULT '[]'`,
     `CREATE TABLE IF NOT EXISTS signals (
       id SERIAL PRIMARY KEY,
       timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

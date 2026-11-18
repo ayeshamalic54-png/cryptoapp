@@ -17,9 +17,10 @@ import {
   analyzeLiveSmcTelemetry,
   computeFeeAdjustedRiskDist,
   formatCryptoPrice,
+  parseFavoritePairs,
   resolveBinanceSymbol,
 } from "./smcEngine";
-import { fetchBinanceKlines, resolveLiveBinanceSymbol, TOP_10_CRYPTO_COINS } from "../routes/binance";
+import { fetchBinanceKlines, isSymbolTradableOnVenue, resolveLiveBinanceSymbol, TOP_10_CRYPTO_COINS } from "../routes/binance";
 import { postDiscordPayload, sendDiscordCryptoCloseAlert, sendDiscordCryptoSignalAlert } from "./discord";
 import { logger } from "./logger";
 
@@ -843,6 +844,120 @@ async function runFastCycle() {
   }
 }
 
+/**
+ * Evaluates a single coin on closed M5/M15 klines and persists live SMC telemetry, zones & scanner state.
+ * Shared across background scan loop and instant Favorite additions.
+ */
+export async function evaluateAndPersistSymbolSmc(
+  rawSym: string,
+  maxSlPct: number,
+  leverage: number,
+  openTradeMap?: Map<string, { side: string; isSmc: boolean }>
+): Promise<{ sym: string; evalRes: ReturnType<typeof analyzeLiveSmcTelemetry> } | null> {
+  const sym = await resolveLiveBinanceSymbol(rawSym);
+  const [m5, m15] = await Promise.all([
+    fetchBinanceKlines(sym, "5m", 120),
+    fetchBinanceKlines(sym, "15m", 90),
+  ]);
+  if (m5.length < 25 || m15.length < 15) return null;
+
+  const evalRes = analyzeLiveSmcTelemetry(sym, m5, m15, maxSlPct, leverage, 1.35);
+  const t = evalRes.telemetry as any;
+  const openInfo = openTradeMap?.get(sym.toUpperCase());
+
+  if (openInfo?.isSmc) {
+    // Keep all 9/9 PASS step telemetry locked while an SMC trade is actively running on this coin; refresh live M5 candles only
+    await db.execute(
+      sql`INSERT INTO smc_telemetry (
+            symbol, m15_bias, sweep_status, sweep_price, choch_status, choch_price,
+            fvg_status, fvg_bounds_json, retest_status, s6_status, s7_status, s8_status, s9_status, action, updated_at
+          ) VALUES (
+            ${sym},
+            ${openInfo.side === "BUY" ? "BULLISH 🟢" : "BEARISH 🔴"},
+            'PASS 🟢 (Active Trade)', ${Number(t.sweep_price || 0).toString()},
+            'PASS 🟢 (Active Trade)', ${Number(t.choch_price || 0).toString()},
+            'PASS 🟢 (Active Trade)', ${t.fvg_bounds_json},
+            'PASS 🟢 (Active Trade)', 'PASS 🟢 (Active Trade)', 'PASS 🟢 (Active Trade)',
+            'PASS 🟢 (SL Protected)', 'PASS 🟢 (M15 Target Active)', ${openInfo.side}, NOW()
+          )
+          ON CONFLICT (symbol) DO UPDATE SET
+            m15_bias = ${openInfo.side === "BUY" ? "BULLISH 🟢" : "BEARISH 🔴"},
+            sweep_status = 'PASS 🟢 (Active Trade)',
+            choch_status = 'PASS 🟢 (Active Trade)',
+            fvg_status = 'PASS 🟢 (Active Trade)',
+            fvg_bounds_json = EXCLUDED.fvg_bounds_json,
+            retest_status = 'PASS 🟢 (Active Trade)',
+            s6_status = 'PASS 🟢 (Active Trade)',
+            s7_status = 'PASS 🟢 (Active Trade)',
+            s8_status = 'PASS 🟢 (SL Protected)',
+            s9_status = 'PASS 🟢 (M15 Target Active)',
+            action = ${openInfo.side},
+            updated_at = NOW()`
+    );
+  } else {
+    await db.execute(
+      sql`INSERT INTO smc_telemetry (
+            symbol, m15_bias, sweep_status, sweep_price, choch_status, choch_price,
+            fvg_status, fvg_bounds_json, retest_status, s6_status, s7_status, s8_status, s9_status, action, updated_at
+          ) VALUES (
+            ${sym}, ${t.m15_bias}, ${t.sweep_status}, ${Number(t.sweep_price || 0).toString()},
+            ${t.choch_status}, ${Number(t.choch_price || 0).toString()},
+            ${t.fvg_status}, ${t.fvg_bounds_json}, ${t.retest_status}, ${t.s6_status}, ${t.s7_status},
+            ${t.s8_status || ""}, ${t.s9_status || ""}, ${t.action}, NOW()
+          )
+          ON CONFLICT (symbol) DO UPDATE SET
+            m15_bias = EXCLUDED.m15_bias,
+            sweep_status = EXCLUDED.sweep_status,
+            sweep_price = EXCLUDED.sweep_price,
+            choch_status = EXCLUDED.choch_status,
+            choch_price = EXCLUDED.choch_price,
+            fvg_status = EXCLUDED.fvg_status,
+            fvg_bounds_json = EXCLUDED.fvg_bounds_json,
+            retest_status = EXCLUDED.retest_status,
+            s6_status = EXCLUDED.s6_status,
+            s7_status = EXCLUDED.s7_status,
+            s8_status = EXCLUDED.s8_status,
+            s9_status = EXCLUDED.s9_status,
+            action = EXCLUDED.action,
+            updated_at = NOW()`
+    );
+  }
+
+  await db.execute(sql`DELETE FROM fvg_zones WHERE UPPER(symbol) = ${sym.toUpperCase()}`);
+  for (const rz of evalRes.rawZones) {
+    await db.execute(
+      sql`INSERT INTO fvg_zones (symbol, zone_type, low_price, high_price, updated_at)
+          VALUES (${sym}, ${rz.zoneType}, ${rz.low.toString()}, ${rz.high.toString()}, NOW())`
+    );
+  }
+
+  const biasStr = String(t.m15_bias || "");
+  const actLabel =
+    t.action === "BUY" || t.action === "SELL"
+      ? t.action
+      : biasStr.includes("BULLISH")
+      ? "BULL_BIAS"
+      : biasStr.includes("BEARISH")
+      ? "BEAR_BIAS"
+      : "NEUTRAL";
+  const pctScore = Number(((evalRes.stepProgress / 9) * 100).toFixed(2));
+  const tpCol = evalRes.tpPrice > 0 ? evalRes.tpPrice : evalRes.livePrice;
+
+  await db.execute(
+    sql`INSERT INTO scanned_assets (symbol_pair, price_a, price_b, win_rate, z_score, action, updated_at)
+        VALUES (${sym}, ${evalRes.livePrice.toString()}, ${tpCol.toString()}, ${pctScore.toString()}, ${Number(evalRes.rrr || 0).toString()}, ${actLabel}, NOW())
+        ON CONFLICT (symbol_pair) DO UPDATE SET
+          price_a = EXCLUDED.price_a,
+          price_b = EXCLUDED.price_b,
+          win_rate = EXCLUDED.win_rate,
+          z_score = EXCLUDED.z_score,
+          action = EXCLUDED.action,
+          updated_at = NOW()`
+  );
+
+  return { sym, evalRes };
+}
+
 async function runSmcScanCycle() {
   if (isScanTickRunning) return;
   isScanTickRunning = true;
@@ -851,11 +966,21 @@ async function runSmcScanCycle() {
     if (!botRow) return;
 
     const activeSym = await resolveLiveBinanceSymbol(String(botRow.active_pair || "BTCUSDT"));
-    const scanList = [...TOP_10_CRYPTO_COINS];
-    if (activeSym && !scanList.includes(activeSym)) scanList.push(activeSym);
+    const favList = parseFavoritePairs(botRow.favorite_pairs);
+    const scanSet = new Set<string>(TOP_10_CRYPTO_COINS);
+    for (const f of favList) scanSet.add(await resolveLiveBinanceSymbol(f));
+    if (activeSym) scanSet.add(activeSym);
+    const scanList = Array.from(scanSet);
 
-    // Clean any legacy Forex/slash pairs from scanned_assets & fvg_zones
+    // Clean any legacy Forex/slash pairs and unpinned stale non-Top10 symbols from scanned_assets
     await db.execute(sql`DELETE FROM scanned_assets WHERE symbol_pair LIKE '%/%'`);
+    const existingRows = (await db.execute(sql`SELECT symbol_pair FROM scanned_assets`)).rows as any[];
+    for (const er of existingRows) {
+      const sU = String(er.symbol_pair || "").toUpperCase();
+      if (sU && !scanSet.has(sU)) {
+        await db.execute(sql`DELETE FROM scanned_assets WHERE UPPER(symbol_pair) = ${sU}`);
+      }
+    }
 
     const maxSlPct = Number(botRow.max_sl_pct ?? 1.2);
     const leverage = Number(botRow.leverage ?? 5);
@@ -883,111 +1008,18 @@ async function runSmcScanCycle() {
     let bestScore = -1;
 
     for (const sym of scanList) {
-      const [m5, m15] = await Promise.all([
-        fetchBinanceKlines(sym, "5m", 120),
-        fetchBinanceKlines(sym, "15m", 90),
-      ]);
-      if (m5.length < 25 || m15.length < 15) continue;
-
-      const evalRes = analyzeLiveSmcTelemetry(sym, m5, m15, maxSlPct, leverage, 1.35);
+      const evaluated = await evaluateAndPersistSymbolSmc(sym, maxSlPct, leverage, openTradeMap);
+      if (!evaluated) continue;
+      const { evalRes } = evaluated;
       const t = evalRes.telemetry as any;
-      const openInfo = openTradeMap.get(sym.toUpperCase());
-
-      if (openInfo?.isSmc) {
-        // Keep all 9/9 PASS step telemetry locked while an SMC trade is actively running on this coin; refresh live M5 candles only
-        await db.execute(
-          sql`INSERT INTO smc_telemetry (
-                symbol, m15_bias, sweep_status, sweep_price, choch_status, choch_price,
-                fvg_status, fvg_bounds_json, retest_status, s6_status, s7_status, s8_status, s9_status, action, updated_at
-              ) VALUES (
-                ${sym},
-                ${openInfo.side === "BUY" ? "BULLISH 🟢" : "BEARISH 🔴"},
-                'PASS 🟢 (Active Trade)', ${Number(t.sweep_price || 0).toString()},
-                'PASS 🟢 (Active Trade)', ${Number(t.choch_price || 0).toString()},
-                'PASS 🟢 (Active Trade)', ${t.fvg_bounds_json},
-                'PASS 🟢 (Active Trade)', 'PASS 🟢 (Active Trade)', 'PASS 🟢 (Active Trade)',
-                'PASS 🟢 (SL Protected)', 'PASS 🟢 (M15 Target Active)', ${openInfo.side}, NOW()
-              )
-              ON CONFLICT (symbol) DO UPDATE SET
-                m15_bias = ${openInfo.side === "BUY" ? "BULLISH 🟢" : "BEARISH 🔴"},
-                sweep_status = 'PASS 🟢 (Active Trade)',
-                choch_status = 'PASS 🟢 (Active Trade)',
-                fvg_status = 'PASS 🟢 (Active Trade)',
-                fvg_bounds_json = EXCLUDED.fvg_bounds_json,
-                retest_status = 'PASS 🟢 (Active Trade)',
-                s6_status = 'PASS 🟢 (Active Trade)',
-                s7_status = 'PASS 🟢 (Active Trade)',
-                s8_status = 'PASS 🟢 (SL Protected)',
-                s9_status = 'PASS 🟢 (M15 Target Active)',
-                action = ${openInfo.side},
-                updated_at = NOW()`
-        );
-      } else {
-        await db.execute(
-          sql`INSERT INTO smc_telemetry (
-                symbol, m15_bias, sweep_status, sweep_price, choch_status, choch_price,
-                fvg_status, fvg_bounds_json, retest_status, s6_status, s7_status, s8_status, s9_status, action, updated_at
-              ) VALUES (
-                ${sym}, ${t.m15_bias}, ${t.sweep_status}, ${Number(t.sweep_price || 0).toString()},
-                ${t.choch_status}, ${Number(t.choch_price || 0).toString()},
-                ${t.fvg_status}, ${t.fvg_bounds_json}, ${t.retest_status}, ${t.s6_status}, ${t.s7_status},
-                ${t.s8_status || ""}, ${t.s9_status || ""}, ${t.action}, NOW()
-              )
-              ON CONFLICT (symbol) DO UPDATE SET
-                m15_bias = EXCLUDED.m15_bias,
-                sweep_status = EXCLUDED.sweep_status,
-                sweep_price = EXCLUDED.sweep_price,
-                choch_status = EXCLUDED.choch_status,
-                choch_price = EXCLUDED.choch_price,
-                fvg_status = EXCLUDED.fvg_status,
-                fvg_bounds_json = EXCLUDED.fvg_bounds_json,
-                retest_status = EXCLUDED.retest_status,
-                s6_status = EXCLUDED.s6_status,
-                s7_status = EXCLUDED.s7_status,
-                s8_status = EXCLUDED.s8_status,
-                s9_status = EXCLUDED.s9_status,
-                action = EXCLUDED.action,
-                updated_at = NOW()`
-        );
-      }
-
-      await db.execute(sql`DELETE FROM fvg_zones WHERE UPPER(symbol) = ${sym.toUpperCase()}`);
-      for (const rz of evalRes.rawZones) {
-        await db.execute(
-          sql`INSERT INTO fvg_zones (symbol, zone_type, low_price, high_price, updated_at)
-              VALUES (${sym}, ${rz.zoneType}, ${rz.low.toString()}, ${rz.high.toString()}, NOW())`
-        );
-      }
-
-      const biasStr = String(t.m15_bias || "");
-      const actLabel =
-        t.action === "BUY" || t.action === "SELL"
-          ? t.action
-          : biasStr.includes("BULLISH")
-          ? "BULL_BIAS"
-          : biasStr.includes("BEARISH")
-          ? "BEAR_BIAS"
-          : "NEUTRAL";
-      const pctScore = Number(((evalRes.stepProgress / 9) * 100).toFixed(2));
-      const tpCol = evalRes.tpPrice > 0 ? evalRes.tpPrice : evalRes.livePrice;
-
-      await db.execute(
-        sql`INSERT INTO scanned_assets (symbol_pair, price_a, price_b, win_rate, z_score, action, updated_at)
-            VALUES (${sym}, ${evalRes.livePrice.toString()}, ${tpCol.toString()}, ${pctScore.toString()}, ${Number(evalRes.rrr || 0).toString()}, ${actLabel}, NOW())
-            ON CONFLICT (symbol_pair) DO UPDATE SET
-              price_a = EXCLUDED.price_a,
-              price_b = EXCLUDED.price_b,
-              win_rate = EXCLUDED.win_rate,
-              z_score = EXCLUDED.z_score,
-              action = EXCLUDED.action,
-              updated_at = NOW()`
-      );
 
       if (t.action === "BUY" || t.action === "SELL") {
-        const sc = (evalRes.rrr || 1.35) + (sym === activeSym ? 2.0 : 0);
+        const tradable = await isSymbolTradableOnVenue(evaluated.sym);
+        if (!tradable) continue;
+        const sc = (evalRes.rrr || 1.35) + (evaluated.sym === activeSym ? 2.0 : favList.includes(evaluated.sym) ? 1.0 : 0);
         if (sc > bestScore) {
           bestScore = sc;
-          bestCandidate = { sym, evalRes };
+          bestCandidate = { sym: evaluated.sym, evalRes };
         }
       }
     }
