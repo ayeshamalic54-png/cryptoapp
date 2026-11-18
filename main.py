@@ -37,8 +37,51 @@ TOP_10_CRYPTO_SYMBOLS = [
 
 _BE_LOCKED_SYMBOLS = {}
 _LAST_COOLDOWN = {}
+_LAST_SIGNAL_ALERT_TS = {}
 _LAST_SCAN_TS = 0.0
 _SHARED_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared_config.json")
+
+
+def send_discord_crypto_smc_signal(
+    action: str,
+    symbol: str,
+    entry_p: float,
+    sl_p: float,
+    tp_p: float,
+    rrr: float,
+    qty: float,
+    leverage: int,
+    account_mode: str,
+    size_info: dict,
+    max_margin_pct: float,
+    ticket_id: int = 0,
+    is_signal_only: bool = False,
+):
+    """Formats Crypto USDT-M Futures SMC alerts identically to the Forex terminal Discord signals."""
+    act_u = str(action).upper()
+    is_long = act_u == "BUY"
+    act_str = "MARKET LONG (BUY) 🟢" if is_long else "MARKET SHORT (SELL) 🔴"
+    sl_pct = (abs(entry_p - sl_p) / entry_p * 100.0) if entry_p > 0 else 0.0
+    now_str = db.format_pkt_time_str()
+    mode_header = (
+        "📢 **[ NEW PURE SMC CRYPTO SIGNAL ]** 📢\n*(Signals Only Mode — Auto-Execution OFF)*"
+        if is_signal_only
+        else f"🚀 **[ NEW CRYPTO FUTURES POSITION OPENED ]** 🚀 *(Ticket `#{ticket_id}`)*"
+    )
+    msg = (
+        f"@everyone\n"
+        f"📢 **PURE SMC / ICT 9-CONDITION CRYPTO FUTURES ENGINE** 📢\n"
+        f"{mode_header}\n\n"
+        f"{'🟢' if is_long else '🔴'} **ACTION:** `{act_str}` (**{symbol}** · {leverage}x)\n"
+        f"⏱ **TIME:** `{now_str}`\n"
+        f"📊 **STRATEGY:** `Pure SMC Structure (9-Step Verified) 🟢`\n"
+        f"💼 **ACCOUNT MODE:** `{account_mode}`\n\n"
+        f"📥 **ENTRY PRICE:** `${db._fmt_price_str(entry_p)}`\n"
+        f"⛔ **STOP LOSS (SL):** `${db._fmt_price_str(sl_p)}` *({sl_pct:.2f}% | Sweep {'-' if is_long else '+'} 0.08% Buffer)*\n"
+        f"🎯 **TAKE PROFIT (TP):** `${db._fmt_price_str(tp_p)}` *({rrr:.2f}R Opposing M15 Liquidity Target)*\n"
+        f"📦 **POSITION SIZE:** `{qty} units` | Risk: `${size_info.get('risk_usdt', 0)} USDT` | Margin: `{size_info.get('margin_pct', 0)}%` *(Cap ≤ {max_margin_pct:.0f}%)*\n"
+    )
+    db.send_discord_message(msg)
 
 
 def _pkt_hour_decimal() -> float:
@@ -365,6 +408,17 @@ def run_smc_scan_and_trade(equity: float, avail_bal: float, open_positions: list
 
     if not auto_exec:
         print(f"[SMC Signal Only] {sym} {action} @ {entry_p} | SL {sl_p} | TP {tp_p} ({rrr:.2f}R) — auto_execute=False")
+        if (now_ts - _LAST_SIGNAL_ALERT_TS.get(sym, 0.0)) >= 300.0:
+            qty_est, sinfo_est = be.calculate_crypto_smc_quantity(
+                symbol=sym, entry_price=entry_p, sl_price=sl_p, usdt_equity=equity,
+                risk_pct=risk_pct, leverage=leverage, max_margin_pct=max_margin_pct, account_mode=account_mode,
+            )
+            send_discord_crypto_smc_signal(
+                action=action, symbol=sym, entry_p=entry_p, sl_p=sl_p, tp_p=tp_p, rrr=rrr,
+                qty=qty_est, leverage=leverage, account_mode=account_mode, size_info=sinfo_est,
+                max_margin_pct=max_margin_pct, is_signal_only=True,
+            )
+            _LAST_SIGNAL_ALERT_TS[sym] = now_ts
         return
 
     allowed_sess, sess_msg = is_session_guard_allowing_entry(settings)
@@ -435,11 +489,20 @@ def run_smc_scan_and_trade(equity: float, avail_bal: float, open_positions: list
             f"SL={exec_res['sl']} | TP={exec_res['tp']} ({rrr:.2f}R) | "
             f"Margin={size_info['margin_used']} USDT ({size_info['margin_pct']}%) @ {leverage}x [{account_mode}]"
         )
-        db.send_discord_message(
-            f"⚡ **CRYPTO FUTURES SMC {action} EXECUTED**\n"
-            f"Coin: `{sym}` | Mode: `{account_mode}` ({leverage}x)\n"
-            f"Entry: `{exec_res['entry_price']}` | SL: `{exec_res['sl']}` | TP: `{exec_res['tp']}` (`{rrr:.2f}R`)\n"
-            f"Qty: `{qty}` | Risk: `{size_info['risk_usdt']} USDT` | Margin Used: `{size_info['margin_pct']}%` (Cap {max_margin_pct:.0f}%)"
+        send_discord_crypto_smc_signal(
+            action=action,
+            symbol=sym,
+            entry_p=float(exec_res["entry_price"]),
+            sl_p=float(exec_res["sl"]),
+            tp_p=float(exec_res["tp"]),
+            rrr=rrr,
+            qty=qty,
+            leverage=leverage,
+            account_mode=account_mode,
+            size_info=size_info,
+            max_margin_pct=max_margin_pct,
+            ticket_id=int(exec_res.get("order_id", 0)),
+            is_signal_only=False,
         )
     else:
         print(f"[EXEC FAILED] {sym} {action}: {exec_res}")

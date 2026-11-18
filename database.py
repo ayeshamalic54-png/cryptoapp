@@ -502,23 +502,53 @@ def log_signal(symbol_a, symbol_b, price_a, price_b, beta, alpha, z_score, obi, 
             conn.close()
     return None
 
+def format_pkt_time_str(dt_val=None):
+    """Formats a datetime (or current UTC) in Pakistani Time (PKT) identically to the Forex terminal."""
+    from datetime import datetime, timezone, timedelta
+    pkt_tz = timezone(timedelta(hours=5))
+    try:
+        if dt_val is None:
+            dt = datetime.now(timezone.utc)
+        else:
+            dt = dt_val
+            if getattr(dt, "tzinfo", None) is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(pkt_tz).strftime("%Y-%m-%d %I:%M:%S %p PKT")
+    except Exception:
+        return str(dt_val or "")
+
+
+def _fmt_price_str(val):
+    p = abs(float(val or 0))
+    if p >= 1000:
+        return f"{float(val):.2f}"
+    if p >= 10:
+        return f"{float(val):.3f}"
+    if p >= 1:
+        return f"{float(val):.4f}"
+    if p >= 0.05:
+        return f"{float(val):.5f}"
+    return f"{float(val):.8f}"
+
+
 def send_discord_message(content):
-    """Sends a general plain text message or embed to the Discord Webhook for Crypto App."""
+    """Sends a notification strictly to the dedicated Crypto Discord Webhook (separate from Forex channel)."""
     import os
     import requests
-    webhook_url = os.getenv("CRYPTO_DISCORD_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK_URL")
-    if not webhook_url:
+    webhook_url = (os.getenv("CRYPTO_DISCORD_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
+    if not webhook_url or not webhook_url.startswith("http"):
         return False
     try:
         payload = {"content": content}
         res = requests.post(webhook_url, json=payload, timeout=5)
-        return res.status_code == 204
+        return res.status_code in (200, 204)
     except Exception as e:
         print(f"Error sending Crypto Discord notification: {e}")
         return False
 
+
 def log_trade_entry(ticket, symbol, order_type, lots, entry_price, entry_time, comment="", signal_id=None):
-    """Logs the entry of a trade and sends a Discord webhook notification."""
+    """Logs the entry of a trade into Neon PostgreSQL (full 9-step Discord signal card sent by strategy engine)."""
     query = """
         INSERT INTO trades (ticket, symbol, order_type, lots, entry_price, entry_time, status, comment, signal_id)
         VALUES (%s, %s, %s, %s, %s, %s, 'OPEN', %s, %s)
@@ -535,16 +565,16 @@ def log_trade_entry(ticket, symbol, order_type, lots, entry_price, entry_time, c
         ))
         conn.commit()
         cur.close()
-
-        # Send Crypto Discord entry notification
-        disc_msg = (
-            f"🪙 **CRYPTO FUTURES POSITION OPENED** 🪙\n\n"
-            f"🎫 **Ticket / Order ID:** `{ticket}`\n"
-            f"💱 **Symbol:** `{symbol}` ({comment})\n"
-            f"📦 **Quantity:** `{lots} units` ({order_type})\n"
-            f"💵 **Entry Price:** `${entry_price:.5f}`\n"
-        )
-        send_discord_message(disc_msg)
+        if "MANUAL" in str(comment).upper():
+            side_txt = "LONG (BUY) 🟢" if str(order_type).upper() == "BUY" else "SHORT (SELL) 🔴"
+            disc_msg = (
+                f"🚀 **[ MANUAL CRYPTO FUTURES OPENED ]** 🚀\n\n"
+                f"🎫 **Ticket:** `{ticket}`\n"
+                f"💱 **Coin:** `{symbol}` (`{side_txt}` | Qty `{lots}`)\n"
+                f"📥 **Entry Price:** `${_fmt_price_str(entry_price)}`\n"
+                f"⏱ **Open Time:** `{format_pkt_time_str(entry_time)}`\n"
+            )
+            send_discord_message(disc_msg)
     except Exception as e:
         print(f"Error logging trade entry: {e}")
     finally:
@@ -599,14 +629,16 @@ def log_trade_exit(ticket, close_price, profit, close_time):
         pnl_val = float(profit)
         pnl_emoji = "🟢" if pnl_val >= 0 else "🔴"
         pnl_sign = "+" if pnl_val >= 0 else ""
+        side_label = "LONG" if str(order_type_str).upper() == "BUY" else "SHORT"
+        pkt_str = format_pkt_time_str(close_time)
 
         disc_msg = (
             f"🏁 **CRYPTO FUTURES POSITION CLOSED** 🏁\n\n"
             f"🎫 **Ticket:** `{ticket}`\n"
-            f"💱 **Symbol:** `{symbol_str}` ({order_type_str} {lots_val} units)\n"
-            f"💵 **Close Price:** `${close_price:.5f}`\n"
-            f"💰 **Realized PnL:** `{pnl_sign}${pnl_val:.2f} USDT` {pnl_emoji}\n"
-            f"⏱ **Close Time:** `{close_time}`\n"
+            f"💱 **Coin:** `{symbol_str}` (`{side_label}` | Qty `{lots_val}`)\n"
+            f"💵 **Close Price:** `${_fmt_price_str(close_price)}`\n"
+            f"💰 **Realized P&L:** `{pnl_sign}${pnl_val:.2f} USDT` {pnl_emoji}\n"
+            f"⏱ **Close Time:** `{pkt_str}`\n"
         )
         send_discord_message(disc_msg)
     except Exception as e:
