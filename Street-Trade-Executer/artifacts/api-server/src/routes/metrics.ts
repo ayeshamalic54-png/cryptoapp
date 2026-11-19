@@ -112,8 +112,7 @@ router.post("/metrics/reset", async (req, res) => {
     const upd = await db.execute(sql`
       UPDATE bot_state
       SET metrics_reset_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
-          initial_balance = CASE WHEN COALESCE(equity, 0) > 0 THEN equity ELSE initial_balance END,
-          max_equity_peak = CASE WHEN COALESCE(equity, 0) > 0 THEN equity ELSE max_equity_peak END,
+          max_equity_peak = GREATEST(COALESCE(initial_balance, 0), COALESCE(equity, 0)),
           drawdown_percent = 0.00,
           overall_drawdown = 0.00,
           updated_at = NOW()
@@ -200,14 +199,12 @@ router.get("/metrics", async (req, res) => {
           : dm?.currentEquity ?? Number((startEq + dayPnl).toFixed(2));
 
       let cum = 0;
-      let peak = 0;
-      let maxLossFromPeak = 0;
+      let maxLossBelowStart = 0;
       for (const s of daySetups) {
         cum += s.profit;
-        if (cum > peak) peak = cum;
-        if (peak - cum > maxLossFromPeak) maxLossFromPeak = peak - cum;
+        if (cum < 0 && -cum > maxLossBelowStart) maxLossBelowStart = -cum;
       }
-      const computedDdPct = startEq > 0 ? Number(((maxLossFromPeak / startEq) * 100).toFixed(2)) : 0;
+      const computedDdPct = startEq > 0 ? Number(((maxLossBelowStart / startEq) * 100).toFixed(2)) : 0;
       const maxDd = Math.max(dm?.maxDrawdownPercent ?? 0, computedDdPct);
 
       return {
@@ -248,8 +245,7 @@ router.get("/metrics/summary", async (req, res) => {
     const baseEquity = Number(botState?.initialBalance ?? 10000) || 10000;
     const chronoSetups = [...setups].sort((a, b) => a.closeTime.getTime() - b.closeTime.getTime());
     let cum = 0;
-    let peak = 0;
-    let maxDropUsd = 0;
+    let maxDropBelowStart = 0;
     const equityCurve: Array<{
       label: string;
       pktTime: string;
@@ -270,8 +266,7 @@ router.get("/metrics/summary", async (req, res) => {
       });
       chronoSetups.forEach((s, i) => {
         cum = Number((cum + s.profit).toFixed(2));
-        if (cum > peak) peak = cum;
-        if (peak - cum > maxDropUsd) maxDropUsd = peak - cum;
+        if (cum < 0 && -cum > maxDropBelowStart) maxDropBelowStart = -cum;
         equityCurve.push({
           label: `#${i + 1}`,
           pktTime: pktTimeFmt.format(s.closeTime),
@@ -283,7 +278,7 @@ router.get("/metrics/summary", async (req, res) => {
       });
     }
 
-    const realizedDdPct = baseEquity > 0 ? Number(((maxDropUsd / baseEquity) * 100).toFixed(2)) : 0;
+    const realizedDdPct = baseEquity > 0 ? Number(((maxDropBelowStart / baseEquity) * 100).toFixed(2)) : 0;
     const activeDatesSet = new Set(setups.map((s) => s.pktDate));
     const dmMaxDd = dmRows
       .filter((r) => {
@@ -300,9 +295,9 @@ router.get("/metrics/summary", async (req, res) => {
     const accNetProfit = Number((liveEqVal - accInitialBal).toFixed(2));
     const accNetPct = accInitialBal > 0 ? Number(((accNetProfit / accInitialBal) * 100).toFixed(2)) : 0;
     const accOverallDd =
-      accInitialBal > 0 && liveEqVal < accInitialBal
+      accInitialBal > 0 && liveEqVal > 0 && liveEqVal < accInitialBal
         ? Number((((accInitialBal - liveEqVal) / accInitialBal) * 100).toFixed(2))
-        : Number(botState?.overallDrawdown ?? 0);
+        : 0;
 
     const maxDdComposite = totalTrades > 0 ? Math.max(realizedDdPct, dmMaxDd) : 0;
 

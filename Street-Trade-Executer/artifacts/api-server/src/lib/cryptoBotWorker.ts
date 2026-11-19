@@ -208,31 +208,23 @@ export async function syncLeverageAcrossCoins(targetLev: number, extraSymbol?: s
 }
 
 /**
- * Extracts strictly USDT-denominated wallet, equity, and available balance so Multi-Asset
- * Testnet collateral (BTC/BNB/ETH) never introduces phantom USD drift when flat.
+ * Extracts full Binance Futures wallet, equity (totalMarginBalance), and available margin
+ * across all Multi-Asset / USDT collateral so USDC/BNB/BTC margin assets are never dropped.
  */
 export function extractAccountSnapshotBalances(accData: any): { walletBalance: number; equity: number; avail: number } {
   const wallet = Number(accData?.totalWalletBalance ?? 0);
   const unreal = Number(accData?.totalUnrealizedProfit ?? 0);
-  const marginBal = Number(accData?.totalMarginBalance ?? wallet + unreal);
+  const rawMarginBal = Number(accData?.totalMarginBalance ?? 0);
+  const marginBal = rawMarginBal > 0 ? rawMarginBal : wallet + unreal;
   const usdtAsset = Array.isArray(accData?.assets)
     ? accData.assets.find((a: any) => String(a.asset || "").toUpperCase() === "USDT")
     : null;
-  const hasUsdtAsset = Boolean(usdtAsset && usdtAsset.walletBalance !== undefined);
-  const usdtWallet = hasUsdtAsset ? Number(usdtAsset.walletBalance ?? wallet) : wallet;
-  const usdtUnreal = hasUsdtAsset ? Number(usdtAsset.unrealizedProfit ?? unreal) : unreal;
-  const usdtMarginBal =
-    hasUsdtAsset && usdtAsset.marginBalance !== undefined && Number(usdtAsset.marginBalance) > 0
-      ? Number(usdtAsset.marginBalance)
-      : usdtWallet + usdtUnreal;
-  const avail =
-    hasUsdtAsset && Number(usdtAsset.availableBalance ?? 0) >= 0
-      ? Number(usdtAsset.availableBalance)
-      : Number(accData?.availableBalance ?? wallet);
-  const equityVal = hasUsdtAsset ? usdtMarginBal : marginBal;
+  const topAvail = Number(accData?.availableBalance ?? 0);
+  const usdtAvail = Number(usdtAsset?.availableBalance ?? 0);
+  const avail = topAvail > 0 ? topAvail : usdtAvail > 0 ? usdtAvail : wallet;
   return {
-    walletBalance: Number(usdtWallet.toFixed(2)),
-    equity: Number(equityVal.toFixed(2)),
+    walletBalance: Number(wallet.toFixed(2)),
+    equity: Number(marginBal.toFixed(2)),
     avail: Number(avail.toFixed(2)),
   };
 }
@@ -704,10 +696,50 @@ async function reconcileClosedSymbol(symbol: string, fallbackClose = 0, fallback
   }
 }
 
+/**
+ * Computes static Drawdown % strictly when balance falls below Starting Equity / daily floor,
+ * so profit pullbacks while still above Starting Equity are never counted as drawdown.
+ */
+export function computeDrawdownMetrics(
+  equity: number,
+  initBal: number,
+  startEq: number
+): { dailyDdPct: number; overallDdPct: number } {
+  const capitalBase = initBal > 0 ? initBal : startEq;
+  const dailyFloor = startEq > 0 && capitalBase > 0 ? Math.min(startEq, capitalBase) : capitalBase || startEq;
+  const dailyLossUsd = dailyFloor > 0 && equity > 0 ? Math.max(0, dailyFloor - equity) : 0;
+  const dailyDdPct = capitalBase > 0 && equity > 0 ? Number(((dailyLossUsd / capitalBase) * 100).toFixed(2)) : 0;
+  const overallDdPct =
+    initBal > 0 && equity > 0 ? Math.max(0, Number((((initBal - equity) / initBal) * 100).toFixed(2))) : 0;
+  return { dailyDdPct, overallDdPct };
+}
+
 /** Repairs any recent closed trades whose DB PnL missed partial/chunked Binance fills. */
 async function reconcileRecentClosedDiscrepancies() {
   if (!hasApiCreds()) return;
   try {
+    // Heal any impossible daily_metrics drawdown spike caused by brief multi-asset snapshot mismatch
+    const snap = await getAccountSnapshot();
+    if (snap.statusCode === 200 && snap.equity > 0) {
+      const todayStr = getPktDateStr();
+      const botRow = ((await db.execute(sql`SELECT initial_balance FROM bot_state ORDER BY id ASC LIMIT 1`)).rows || [])[0] as any;
+      const dmRow = ((await db.execute(sql`SELECT start_equity, max_drawdown_percent FROM daily_metrics WHERE trading_date=${todayStr} AND COALESCE(mt5_login,0)=0 LIMIT 1`)).rows || [])[0] as any;
+      const initBal = Number(botRow?.initial_balance ?? 0) > 0 ? Number(botRow.initial_balance) : snap.equity;
+      const startEq = Number(dmRow?.start_equity ?? 0);
+      const recordedMaxDd = Number(dmRow?.max_drawdown_percent ?? 0);
+      if (startEq > 0 && recordedMaxDd > 20 && snap.equity / startEq > 0.85) {
+        const { dailyDdPct } = computeDrawdownMetrics(snap.equity, initBal, startEq);
+        await db.execute(
+          sql`UPDATE daily_metrics
+              SET current_equity=${snap.equity.toString()},
+                  max_drawdown_percent=${dailyDdPct.toString()},
+                  updated_at=NOW()
+              WHERE trading_date=${todayStr} AND COALESCE(mt5_login,0)=0`
+        );
+        logger.info({ todayStr, prevMaxDd: recordedMaxDd, healedDd: dailyDdPct, equity: snap.equity }, "Healed spurious daily_metrics drawdown spike");
+      }
+    }
+
     const rows = (
       await db.execute(
         sql`SELECT ticket, symbol, order_type, lots, entry_price, close_price, profit,
@@ -991,11 +1023,8 @@ async function runFastCycle() {
       );
     }
 
-    // Compute Daily Drawdown & Overall Drawdown strictly relative to configured Capital (initial_balance)
-    const capitalBase = initBal > 0 ? initBal : startEq;
-    const dailyLossUsd = startEq > 0 && equity > 0 ? Math.max(0, startEq - equity) : 0;
-    const dailyDdPct = capitalBase > 0 && equity > 0 ? Number(((dailyLossUsd / capitalBase) * 100).toFixed(2)) : 0;
-    const overallDdPct = initBal > 0 && equity > 0 ? Math.max(0, Number((((initBal - equity) / initBal) * 100).toFixed(2))) : 0;
+    // Compute Daily Drawdown & Overall Drawdown strictly when balance is below Starting Equity / floor
+    const { dailyDdPct, overallDdPct } = computeDrawdownMetrics(equity, initBal, startEq);
     const dbPeakEq = Math.max(Number(botRow.max_equity_peak ?? 0), equity);
     peakEquityTracker = dbPeakEq;
 
