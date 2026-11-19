@@ -35,6 +35,7 @@ interface SymbolFilter {
 const filterCache = new Map<string, { ts: number; filter: SymbolFilter }>();
 const leverageCache = new Map<string, number>();
 const beLockedTickets = new Set<number>();
+const tpSyncedTickets = new Set<number>();
 const peakFloatingMap = new Map<number, number>();
 const closeConfirmCount = new Map<string, number>();
 const tradeCooldown = new Map<string, number>();
@@ -422,21 +423,80 @@ async function placeConditionalClose(symbol: string, exitSide: "BUY" | "SELL", t
 }
 
 /**
- * Places a reduceOnly LIMIT Take Profit order (0.02% Maker fee vs 0.05% Taker fee — saves 60% exit fee),
- * falling back to TAKE_PROFIT_MARKET only if the exchange rejects immediate limit placement.
+ * Places TAKE_PROFIT_MARKET (closePosition: true) so Binance Positions -> "TP/SL for position"
+ * visibly displays TP alongside SL and guarantees close on fast wicks; falls back to reduceOnly LIMIT.
  */
-async function placeLowFeeTpOrder(symbol: string, exitSide: "BUY" | "SELL", tpPrice: number, qty: number) {
+async function placeVisibleTpOrder(symbol: string, exitSide: "BUY" | "SELL", tpPrice: number, fallbackQty: number) {
+  const condOk = await placeConditionalClose(symbol, exitSide, "TAKE_PROFIT_MARKET", tpPrice);
+  if (condOk) return true;
   const lim = await signedBinanceRequest("POST", "/fapi/v1/order", {
     symbol,
     side: exitSide,
     type: "LIMIT",
     timeInForce: "GTC",
-    quantity: String(qty),
+    quantity: String(fallbackQty),
     price: String(tpPrice),
     reduceOnly: "true",
   });
-  if (lim.ok) return true;
-  return placeConditionalClose(symbol, exitSide, "TAKE_PROFIT_MARKET", tpPrice);
+  return lim.ok;
+}
+
+/**
+ * Ensures an open Binance position has TAKE_PROFIT_MARKET (closePosition: true) registered so
+ * Binance's "TP/SL for position" shows TP (replacing any standalone LIMIT TP2 at the same price while preserving TP1).
+ */
+export async function ensureExchangeTpForOpenPosition(
+  symbol: string,
+  side: "BUY" | "SELL",
+  markPrice: number,
+  slPrice: number,
+  tpPrice: number
+): Promise<{ synced: boolean; placedTp: boolean; cancelledLimitIds: number[] }> {
+  const exitSide = side === "BUY" ? "SELL" : "BUY";
+  const filter = await getSymbolFilters(symbol);
+  const tpRound = quantizeTick(tpPrice, filter.tickSize);
+  const slRound = quantizeTick(slPrice, filter.tickSize);
+  const cancelledLimitIds: number[] = [];
+
+  const [aoRes, ooRes] = await Promise.all([
+    signedBinanceRequest("GET", "/fapi/v1/openAlgoOrders", { symbol }),
+    signedBinanceRequest("GET", "/fapi/v1/openOrders", { symbol }),
+  ]);
+  if (!aoRes.ok && !ooRes.ok) return { synced: false, placedTp: false, cancelledLimitIds };
+
+  const algoList: any[] = Array.isArray(aoRes.data) ? aoRes.data : Array.isArray(aoRes.data?.orders) ? aoRes.data.orders : [];
+  const openList: any[] = Array.isArray(ooRes.data) ? ooRes.data : [];
+  const allOrders = [...algoList, ...openList];
+
+  const hasTp = allOrders.some((o) => String(o.orderType || o.type || "").toUpperCase().startsWith("TAKE_PROFIT"));
+  const hasSl = allOrders.some((o) => String(o.orderType || o.type || "").toUpperCase().startsWith("STOP"));
+
+  if (!hasSl && slRound > 0) {
+    const slSafe = side === "BUY" ? markPrice > slRound * 1.0002 : markPrice < slRound * 0.9998;
+    if (slSafe) {
+      await placeConditionalClose(symbol, exitSide, "STOP_MARKET", slRound);
+    }
+  }
+
+  let placedTp = false;
+  if (!hasTp && tpRound > 0) {
+    const tpSafe = side === "BUY" ? markPrice < tpRound * 0.9998 : markPrice > tpRound * 1.0002;
+    if (!tpSafe) return { synced: false, placedTp: false, cancelledLimitIds };
+
+    const tol = Math.max(filter.tickSize * 2, tpRound * 0.0005);
+    for (const o of openList) {
+      const oType = String(o.type || "").toUpperCase();
+      const oPx = Number(o.price || 0);
+      if (oType === "LIMIT" && o.reduceOnly && Math.abs(oPx - tpRound) <= tol && o.orderId) {
+        const del = await signedBinanceRequest("DELETE", "/fapi/v1/order", { symbol, orderId: o.orderId });
+        if (del.ok) cancelledLimitIds.push(Number(o.orderId));
+      }
+    }
+    placedTp = await placeConditionalClose(symbol, exitSide, "TAKE_PROFIT_MARKET", tpRound);
+    return { synced: placedTp, placedTp, cancelledLimitIds };
+  }
+
+  return { synced: hasTp, placedTp, cancelledLimitIds };
 }
 
 async function executeSingleFuturesOrder(
@@ -510,12 +570,12 @@ async function executeSingleFuturesOrder(
       reduceOnly: "true",
     });
     if (tp1Res.ok) {
-      await placeLowFeeTpOrder(binSym, exitSide, tpRound, tp2Qty);
+      await placeVisibleTpOrder(binSym, exitSide, tpRound, tp2Qty);
       splitPlaced = true;
     }
   }
   if (!splitPlaced) {
-    await placeLowFeeTpOrder(binSym, exitSide, tpRound, execQty);
+    await placeVisibleTpOrder(binSym, exitSide, tpRound, execQty);
   }
 
   await db.execute(
@@ -753,6 +813,7 @@ async function reconcileClosedSymbol(symbol: string, fallbackClose = 0, fallback
     const ticket = Number(row.ticket);
     peakFloatingMap.delete(ticket);
     beLockedTickets.delete(ticket);
+    tpSyncedTickets.delete(ticket);
     await db.execute(
       sql`UPDATE trades SET close_price=${closeP.toString()}, profit=${netPnl.toString()}, close_time=NOW(), status='CLOSED' WHERE ticket=${ticket}`
     );
@@ -1031,15 +1092,26 @@ async function runFastCycle() {
         ).rows || [])[0] as any;
         if (!meta) continue;
         const ticket = Number(meta.ticket);
+        const entryP = Number(meta.entry_price || p.entryPrice);
+        const origLots = Number(meta.lots || 0);
+        const slP = Number(meta.sl || 0);
+        const tpP = Number(meta.tp || 0);
+
+        if (!tpSyncedTickets.has(ticket) && tpP > 0) {
+          const syncRes = await ensureExchangeTpForOpenPosition(p.symbol, p.side, p.markPrice, slP, tpP);
+          if (syncRes.synced) {
+            tpSyncedTickets.add(ticket);
+            if (syncRes.placedTp) {
+              logger.info({ symbol: p.symbol, ticket, tp: tpP, cancelledLimitIds: syncRes.cancelledLimitIds }, "Synced TAKE_PROFIT_MARKET onto open Binance position");
+            }
+          }
+        }
+
         const peakFloat = Math.max(peakFloatingMap.get(ticket) ?? upnl, upnl);
         peakFloatingMap.set(ticket, peakFloat);
         if (beLockedTickets.has(ticket)) continue;
 
         const isLong = p.side === "BUY";
-        const entryP = Number(meta.entry_price || p.entryPrice);
-        const origLots = Number(meta.lots || 0);
-        const slP = Number(meta.sl || 0);
-        const tpP = Number(meta.tp || 0);
         const alreadyBe = isLong ? slP >= entryP * 1.0002 : slP > 0 && slP <= entryP * 0.9998;
         if (alreadyBe) {
           beLockedTickets.add(ticket);
