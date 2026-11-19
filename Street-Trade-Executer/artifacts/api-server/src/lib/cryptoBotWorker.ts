@@ -207,6 +207,36 @@ export async function syncLeverageAcrossCoins(targetLev: number, extraSymbol?: s
   logger.info({ leverage: lev, symbols: list.length }, "Synced Binance Futures leverage across scanner coins");
 }
 
+/**
+ * Extracts strictly USDT-denominated wallet, equity, and available balance so Multi-Asset
+ * Testnet collateral (BTC/BNB/ETH) never introduces phantom USD drift when flat.
+ */
+export function extractAccountSnapshotBalances(accData: any): { walletBalance: number; equity: number; avail: number } {
+  const wallet = Number(accData?.totalWalletBalance ?? 0);
+  const unreal = Number(accData?.totalUnrealizedProfit ?? 0);
+  const marginBal = Number(accData?.totalMarginBalance ?? wallet + unreal);
+  const usdtAsset = Array.isArray(accData?.assets)
+    ? accData.assets.find((a: any) => String(a.asset || "").toUpperCase() === "USDT")
+    : null;
+  const hasUsdtAsset = Boolean(usdtAsset && usdtAsset.walletBalance !== undefined);
+  const usdtWallet = hasUsdtAsset ? Number(usdtAsset.walletBalance ?? wallet) : wallet;
+  const usdtUnreal = hasUsdtAsset ? Number(usdtAsset.unrealizedProfit ?? unreal) : unreal;
+  const usdtMarginBal =
+    hasUsdtAsset && usdtAsset.marginBalance !== undefined && Number(usdtAsset.marginBalance) > 0
+      ? Number(usdtAsset.marginBalance)
+      : usdtWallet + usdtUnreal;
+  const avail =
+    hasUsdtAsset && Number(usdtAsset.availableBalance ?? 0) >= 0
+      ? Number(usdtAsset.availableBalance)
+      : Number(accData?.availableBalance ?? wallet);
+  const equityVal = hasUsdtAsset ? usdtMarginBal : marginBal;
+  return {
+    walletBalance: Number(usdtWallet.toFixed(2)),
+    equity: Number(equityVal.toFixed(2)),
+    avail: Number(avail.toFixed(2)),
+  };
+}
+
 async function getAccountSnapshot(): Promise<{
   equity: number;
   avail: number;
@@ -220,18 +250,7 @@ async function getAccountSnapshot(): Promise<{
   if (!accRes.ok || !posRes.ok || !Array.isArray(posRes.data)) {
     return { equity: 0, avail: 0, positions: [], statusCode: !accRes.ok ? accRes.status : posRes.status || 502 };
   }
-  const wallet = Number(accRes.data?.totalWalletBalance ?? 0);
-  const unreal = Number(accRes.data?.totalUnrealizedProfit ?? 0);
-  const marginBal = Number(accRes.data?.totalMarginBalance ?? wallet + unreal);
-  const usdtAsset = Array.isArray(accRes.data?.assets)
-    ? accRes.data.assets.find((a: any) => String(a.asset || "").toUpperCase() === "USDT")
-    : null;
-  const lockedInitMargin = Number(accRes.data?.totalInitialMargin ?? 0);
-  const usdtMultiEq = usdtAsset ? Number(usdtAsset.availableBalance ?? 0) + lockedInitMargin : 0;
-  const avail = usdtAsset && Number(usdtAsset.availableBalance ?? 0) > 0
-    ? Number(usdtAsset.availableBalance)
-    : Number(accRes.data?.availableBalance ?? wallet);
-  const equityVal = accRes.data?.multiAssetsMargin && usdtMultiEq > 0 ? Math.max(marginBal, usdtMultiEq) : marginBal;
+  const { equity, avail } = extractAccountSnapshotBalances(accRes.data);
 
   const positions = posRes.data
     .filter((p) => Math.abs(Number(p.positionAmt || 0)) > 0)
@@ -245,7 +264,7 @@ async function getAccountSnapshot(): Promise<{
       leverage: Number(p.leverage || 0),
     }));
 
-  return { equity: Number(equityVal.toFixed(2)), avail: Number(avail.toFixed(2)), positions, statusCode: 200 };
+  return { equity, avail, positions, statusCode: 200 };
 }
 
 function calculateFuturesQty(
@@ -499,6 +518,151 @@ async function closeSymbolPositions(targetSymbol: string, positions: any[], reas
   return { closed, error: lastErr };
 }
 
+async function fetchSymbolFillsRange(symbol: string, startMs: number, endMs?: number): Promise<any[]> {
+  const params: Record<string, string | number> = {
+    symbol,
+    startTime: Math.max(0, Math.floor(startMs)),
+    limit: 1000,
+  };
+  if (endMs && endMs > startMs) params.endTime = Math.ceil(endMs);
+  const firstRes = await signedBinanceRequest("GET", "/fapi/v1/userTrades", params);
+  if (!firstRes.ok || !Array.isArray(firstRes.data)) return [];
+  const all = [...firstRes.data];
+  let page = 0;
+  let lastBatch = firstRes.data;
+  while (lastBatch.length === 1000 && page < 4) {
+    page++;
+    const lastId = Number(lastBatch[lastBatch.length - 1]?.id || 0);
+    if (!lastId) break;
+    const nextRes = await signedBinanceRequest("GET", "/fapi/v1/userTrades", {
+      symbol,
+      fromId: lastId + 1,
+      limit: 1000,
+    });
+    if (!nextRes.ok || !Array.isArray(nextRes.data) || nextRes.data.length === 0) break;
+    const filtered = endMs
+      ? nextRes.data.filter((f: any) => Number(f.time || 0) <= endMs)
+      : nextRes.data;
+    all.push(...filtered);
+    lastBatch = nextRes.data;
+    if (endMs && filtered.length < nextRes.data.length) break;
+  }
+  return all;
+}
+
+async function fetchSymbolIncomeLedger(
+  symbol: string,
+  startMs: number,
+  endMs?: number
+): Promise<{ matched: boolean; rpnl: number; fees: number }> {
+  const params: Record<string, string | number> = {
+    symbol,
+    startTime: Math.max(0, Math.floor(startMs)),
+    limit: 1000,
+  };
+  if (endMs && endMs > startMs) params.endTime = Math.ceil(endMs);
+  const res = await signedBinanceRequest("GET", "/fapi/v1/income", params);
+  if (!res.ok || !Array.isArray(res.data)) return { matched: false, rpnl: 0, fees: 0 };
+  let rpnl = 0;
+  let fees = 0;
+  let matched = false;
+  for (const inc of res.data) {
+    const t = String(inc.incomeType || "").toUpperCase();
+    const val = Number(inc.income || 0);
+    if (t === "REALIZED_PNL") {
+      rpnl += val;
+      matched = true;
+    } else if (t === "COMMISSION" && String(inc.asset || "USDT").toUpperCase() === "USDT") {
+      fees += Math.abs(val);
+    }
+  }
+  return { matched, rpnl, fees };
+}
+
+export async function computeBinanceTradeOutcome(
+  symbol: string,
+  orderType: string,
+  expectedLots: number,
+  entryMs: number,
+  closeMs?: number,
+  fallbackClose = 0,
+  fallbackPnl = 0
+): Promise<{ matched: boolean; netPnl: number; closePrice: number; exitQtySum: number }> {
+  const windowStart = Math.max(0, entryMs - 15_000);
+  const windowEnd = closeMs ? closeMs + 30_000 : undefined;
+  const entrySide = String(orderType || "BUY").toUpperCase();
+
+  const summarizeFills = (rows: any[]) => {
+    let rpnl = 0;
+    let fees = 0;
+    let closeQtySum = 0;
+    let closeWeightedPx = 0;
+    let matched = false;
+    for (const f of rows) {
+      const fTime = Number(f.time || 0);
+      if (fTime < windowStart || (windowEnd && fTime > windowEnd)) continue;
+      const rp = Number(f.realizedPnl || 0);
+      const fQty = Number(f.qty || 0);
+      const fPx = Number(f.price || 0);
+      const fSide = String(f.side || "").toUpperCase();
+      if (Math.abs(rp) > 0) {
+        rpnl += rp;
+        matched = true;
+      }
+      if ((fSide && fSide !== entrySide) || Math.abs(rp) > 0) {
+        if (fQty > 0 && fPx > 0) {
+          closeWeightedPx += fPx * fQty;
+          closeQtySum += fQty;
+        }
+      }
+      if (String(f.commissionAsset || "").toUpperCase() === "USDT") {
+        fees += Number(f.commission || 0);
+      }
+    }
+    const closePrice =
+      closeQtySum > 0 ? Number((closeWeightedPx / closeQtySum).toFixed(8)) : fallbackClose;
+    return { matched, netPnl: Number((rpnl - fees).toFixed(2)), closePrice, exitQtySum: closeQtySum, rpnl };
+  };
+
+  let fills = await fetchSymbolFillsRange(symbol, windowStart, windowEnd);
+  let summary = summarizeFills(fills);
+
+  // Brief retry if live close fills just settled and matching engine hasn't indexed all chunks yet
+  if (!closeMs && expectedLots > 0 && summary.exitQtySum < expectedLots * 0.9) {
+    await new Promise((r) => setTimeout(r, 1500));
+    fills = await fetchSymbolFillsRange(symbol, windowStart, windowEnd);
+    summary = summarizeFills(fills);
+  }
+
+  // Cross-verify against /fapi/v1/income when fills were truncated or incomplete
+  if (!summary.matched || (expectedLots > 0 && summary.exitQtySum < expectedLots * 0.9)) {
+    const ledger = await fetchSymbolIncomeLedger(symbol, windowStart, windowEnd);
+    if (ledger.matched && (!summary.matched || Math.abs(ledger.rpnl) > Math.abs(summary.rpnl))) {
+      return {
+        matched: true,
+        netPnl: Number((ledger.rpnl - ledger.fees).toFixed(2)),
+        closePrice: summary.closePrice || fallbackClose,
+        exitQtySum: Math.max(summary.exitQtySum, expectedLots),
+      };
+    }
+  }
+
+  if (summary.matched) {
+    return {
+      matched: true,
+      netPnl: summary.netPnl,
+      closePrice: summary.closePrice || fallbackClose,
+      exitQtySum: summary.exitQtySum,
+    };
+  }
+  return {
+    matched: false,
+    netPnl: Number(fallbackPnl.toFixed(2)),
+    closePrice: fallbackClose,
+    exitQtySum: 0,
+  };
+}
+
 async function reconcileClosedSymbol(symbol: string, fallbackClose = 0, fallbackPnl = 0, reason = "SL/TP Fill") {
   const openRows = (
     await db.execute(
@@ -508,30 +672,20 @@ async function reconcileClosedSymbol(symbol: string, fallbackClose = 0, fallback
   ).rows as any[];
   if (!openRows.length) return;
 
-  let fills: any[] = [];
-  const uRes = await signedBinanceRequest("GET", "/fapi/v1/userTrades", { symbol, limit: 30 });
-  if (uRes.ok && Array.isArray(uRes.data)) fills = uRes.data;
-
   for (const row of openRows) {
     const entryMs = Number(row.entry_ms || 0);
-    let rpnl = 0;
-    let fees = 0;
-    let closeP = fallbackClose || Number(row.entry_price || 0);
-    let matched = false;
-    for (const f of fills) {
-      if (Number(f.time || 0) >= entryMs - 15_000) {
-        const rp = Number(f.realizedPnl || 0);
-        if (Math.abs(rp) > 0) {
-          rpnl += rp;
-          closeP = Number(f.price || closeP) || closeP;
-          matched = true;
-        }
-        if (String(f.commissionAsset || "").toUpperCase() === "USDT") {
-          fees += Number(f.commission || 0);
-        }
-      }
-    }
-    const netPnl = matched ? Number((rpnl - fees).toFixed(2)) : Number(fallbackPnl.toFixed(2));
+    const lots = Number(row.lots || 0);
+    const outcome = await computeBinanceTradeOutcome(
+      symbol,
+      String(row.order_type || "BUY"),
+      lots,
+      entryMs,
+      undefined,
+      fallbackClose || Number(row.entry_price || 0),
+      fallbackPnl
+    );
+    const closeP = outcome.closePrice || Number(row.entry_price || 0);
+    const netPnl = outcome.netPnl;
     const ticket = Number(row.ticket);
     peakFloatingMap.delete(ticket);
     beLockedTickets.delete(ticket);
@@ -542,11 +696,69 @@ async function reconcileClosedSymbol(symbol: string, fallbackClose = 0, fallback
       ticket,
       symbol,
       String(row.order_type || "BUY"),
-      Number(row.lots || 0),
+      lots,
       closeP,
       netPnl,
       reason
     );
+  }
+}
+
+/** Repairs any recent closed trades whose DB PnL missed partial/chunked Binance fills. */
+async function reconcileRecentClosedDiscrepancies() {
+  if (!hasApiCreds()) return;
+  try {
+    const rows = (
+      await db.execute(
+        sql`SELECT ticket, symbol, order_type, lots, entry_price, close_price, profit,
+                   (EXTRACT(EPOCH FROM (entry_time AT TIME ZONE 'UTC')) * 1000) AS entry_ms,
+                   (EXTRACT(EPOCH FROM (close_time AT TIME ZONE 'UTC')) * 1000) AS close_ms
+            FROM trades
+            WHERE status='CLOSED' AND close_time >= NOW() - INTERVAL '72 hours'
+            ORDER BY close_time DESC LIMIT 20`
+      )
+    ).rows as any[];
+    if (!rows.length) return;
+
+    for (const r of rows) {
+      const sym = String(r.symbol || "").toUpperCase();
+      const entryMs = Number(r.entry_ms || 0);
+      const closeMs = Number(r.close_ms || 0);
+      const lots = Number(r.lots || 0);
+      if (!sym || !entryMs || !closeMs || lots <= 0) continue;
+
+      // Skip if another DB trade for the same symbol overlaps this exact window
+      const overlaps = rows.some(
+        (other) =>
+          Number(other.ticket) !== Number(r.ticket) &&
+          String(other.symbol || "").toUpperCase() === sym &&
+          Number(other.entry_ms || 0) <= closeMs + 30_000 &&
+          Number(other.close_ms || 0) >= entryMs - 15_000
+      );
+      if (overlaps) continue;
+
+      const dbProfit = Number(r.profit ?? 0);
+      const outcome = await computeBinanceTradeOutcome(
+        sym,
+        String(r.order_type || "BUY"),
+        lots,
+        entryMs,
+        closeMs,
+        Number(r.close_price || r.entry_price || 0),
+        dbProfit
+      );
+      if (outcome.matched && outcome.exitQtySum >= lots * 0.85 && Math.abs(outcome.netPnl - dbProfit) > 0.5) {
+        await db.execute(
+          sql`UPDATE trades SET close_price=${outcome.closePrice.toString()}, profit=${outcome.netPnl.toString()} WHERE ticket=${Number(r.ticket)}`
+        );
+        logger.info(
+          { ticket: Number(r.ticket), sym, oldPnl: dbProfit, fixedPnl: outcome.netPnl, closePrice: outcome.closePrice },
+          "Backfilled truncated closed trade PnL from Binance ledger"
+        );
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, "Startup closed-trade ledger reconciliation skipped");
   }
 }
 
@@ -1138,7 +1350,9 @@ export function startCryptoBotWorker() {
     "Starting Direct Cloud Crypto 9-Step SMC Worker (No VPS required)"
   );
 
-  void syncBinanceTime();
+  void syncBinanceTime().then(() => {
+    void reconcileRecentClosedDiscrepancies();
+  });
   setTimeout(() => {
     void runFastCycle();
     void runSmcScanCycle();

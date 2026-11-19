@@ -393,7 +393,10 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent className="pb-2">
               <div className="text-lg font-mono font-bold text-sky-400">{formatUsdt(equity)}</div>
-              <div className="text-[10px] text-zinc-500 font-mono mt-0.5 mb-1.5">Start: {formatUsdt(baseInitial)}</div>
+              <div className="text-[10px] text-zinc-400 font-mono mt-0.5">
+                Wallet: <span className="text-zinc-200 font-semibold">{formatUsdt(equity - floatingProfit)}</span>
+              </div>
+              <div className="text-[10px] text-zinc-500 font-mono mb-1.5">Start: {formatUsdt(baseInitial)}</div>
               {pnlHistory.length > 2 && (
                 <ResponsiveContainer width="100%" height={30}>
                   <AreaChart data={pnlHistory}>
