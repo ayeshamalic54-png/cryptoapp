@@ -102,26 +102,30 @@ async function signedBinanceRequest(
     return `${getBaseUrl()}${endpoint}?${qs}&signature=${sig}`;
   };
 
-  let resp = await fetch(buildUrl(), {
-    method,
-    headers: { "X-MBX-APIKEY": key },
-    signal: AbortSignal.timeout(10000),
-  });
-  let text = await resp.text();
-  if (resp.status === 400 && text.includes("-1021")) {
-    await syncBinanceTime();
-    resp = await fetch(buildUrl(), {
+  try {
+    let resp = await fetch(buildUrl(), {
       method,
       headers: { "X-MBX-APIKEY": key },
       signal: AbortSignal.timeout(10000),
     });
-    text = await resp.text();
+    let text = await resp.text();
+    if (resp.status === 400 && text.includes("-1021")) {
+      await syncBinanceTime();
+      resp = await fetch(buildUrl(), {
+        method,
+        headers: { "X-MBX-APIKEY": key },
+        signal: AbortSignal.timeout(10000),
+      });
+      text = await resp.text();
+    }
+    let data: any = null;
+    try {
+      data = JSON.parse(text);
+    } catch {}
+    return { status: resp.status, ok: resp.ok, data, text };
+  } catch (err: any) {
+    return { status: 504, ok: false, data: null, text: err?.message || "Binance request timeout" };
   }
-  let data: any = null;
-  try {
-    data = JSON.parse(text);
-  } catch {}
-  return { status: resp.status, ok: resp.ok, data, text };
 }
 
 async function getSymbolFilters(symbol: string): Promise<SymbolFilter> {
@@ -229,9 +233,56 @@ export function extractAccountSnapshotBalances(accData: any): { walletBalance: n
   };
 }
 
+function mapBinancePositionRow(p: any, fallbackUnReal = 0) {
+  const amt = Number(p.positionAmt || 0);
+  const pnlRaw = Number(p.unRealizedProfit ?? p.unrealizedProfit ?? 0);
+  const unrealizedPnl = Math.abs(pnlRaw) > 0 ? pnlRaw : fallbackUnReal;
+  return {
+    symbol: String(p.symbol),
+    side: amt > 0 ? ("BUY" as const) : ("SELL" as const),
+    qty: Math.abs(amt),
+    entryPrice: Number(p.entryPrice || 0),
+    markPrice: Number(p.markPrice || p.entryPrice || 0),
+    unrealizedPnl,
+    leverage: Number(p.leverage || 0),
+  };
+}
+
+/**
+ * Resolves next Floating P&L without flickering to $0.00 on transient Binance API errors,
+ * empty bulk positionRisk responses, or 1-cycle close confirmation waits while DB has OPEN trades.
+ */
+export function resolveNextFloatingProfit(opts: {
+  credsPresent: boolean;
+  snapOk: boolean;
+  positions: Array<{ unrealizedPnl?: number }>;
+  totalUnrealizedProfit: number;
+  openDbCount: number;
+  prevFloating: number;
+}): number {
+  if (!opts.credsPresent) return 0;
+  if (!opts.snapOk) {
+    return opts.openDbCount > 0 ? Number(opts.prevFloating.toFixed(2)) : 0;
+  }
+  if (opts.positions.length > 0) {
+    const posSum = Number(opts.positions.reduce((s, p) => s + Number(p.unrealizedPnl || 0), 0).toFixed(2));
+    if (Math.abs(posSum) < 0.01 && Math.abs(opts.totalUnrealizedProfit) >= 0.01) {
+      return Number(opts.totalUnrealizedProfit.toFixed(2));
+    }
+    return posSum;
+  }
+  if (opts.openDbCount > 0) {
+    return Math.abs(opts.totalUnrealizedProfit) >= 0.01
+      ? Number(opts.totalUnrealizedProfit.toFixed(2))
+      : Number(opts.prevFloating.toFixed(2));
+  }
+  return 0;
+}
+
 async function getAccountSnapshot(): Promise<{
   equity: number;
   avail: number;
+  totalUnrealizedProfit: number;
   positions: any[];
   statusCode: number;
 }> {
@@ -239,24 +290,45 @@ async function getAccountSnapshot(): Promise<{
     signedBinanceRequest("GET", "/fapi/v2/account"),
     signedBinanceRequest("GET", "/fapi/v2/positionRisk"),
   ]);
-  if (!accRes.ok || !posRes.ok || !Array.isArray(posRes.data)) {
-    return { equity: 0, avail: 0, positions: [], statusCode: !accRes.ok ? accRes.status : posRes.status || 502 };
+  if (!accRes.ok) {
+    return { equity: 0, avail: 0, totalUnrealizedProfit: 0, positions: [], statusCode: accRes.status || 502 };
   }
   const { equity, avail } = extractAccountSnapshotBalances(accRes.data);
+  const totalUnrealizedProfit = Number(accRes.data?.totalUnrealizedProfit ?? 0);
 
-  const positions = posRes.data
-    .filter((p) => Math.abs(Number(p.positionAmt || 0)) > 0)
-    .map((p) => ({
-      symbol: String(p.symbol),
-      side: Number(p.positionAmt) > 0 ? ("BUY" as const) : ("SELL" as const),
-      qty: Math.abs(Number(p.positionAmt)),
-      entryPrice: Number(p.entryPrice || 0),
-      markPrice: Number(p.markPrice || p.entryPrice || 0),
-      unrealizedPnl: Number(p.unRealizedProfit || 0),
-      leverage: Number(p.leverage || 0),
-    }));
+  const accPosBySym = new Map<string, any>();
+  if (Array.isArray(accRes.data?.positions)) {
+    for (const ap of accRes.data.positions) {
+      if (Math.abs(Number(ap.positionAmt || 0)) > 0) {
+        accPosBySym.set(String(ap.symbol).toUpperCase(), ap);
+      }
+    }
+  }
 
-  return { equity, avail, positions, statusCode: 200 };
+  const posBySym = new Map<string, any>();
+  if (posRes.ok && Array.isArray(posRes.data)) {
+    for (const p of posRes.data) {
+      if (Math.abs(Number(p.positionAmt || 0)) > 0) {
+        const symU = String(p.symbol).toUpperCase();
+        const ap = accPosBySym.get(symU);
+        const accPnl = Number(ap?.unrealizedProfit ?? 0);
+        posBySym.set(symU, mapBinancePositionRow(p, accPnl));
+      }
+    }
+  }
+  for (const [symU, ap] of accPosBySym.entries()) {
+    if (!posBySym.has(symU)) {
+      posBySym.set(symU, mapBinancePositionRow(ap));
+    }
+  }
+
+  return {
+    equity,
+    avail,
+    totalUnrealizedProfit,
+    positions: Array.from(posBySym.values()),
+    statusCode: 200,
+  };
 }
 
 function calculateFuturesQty(
@@ -831,6 +903,7 @@ async function runFastCycle() {
     let equity = Number(botRow.equity ?? 0);
     let positions: any[] = [];
     let binanceStatusCode = 200;
+    let totalUnrealizedProfit = 0;
 
     if (credsPresent) {
       const snap = await getAccountSnapshot();
@@ -838,12 +911,13 @@ async function runFastCycle() {
       if (snap.statusCode === 200) {
         equity = snap.equity;
         positions = snap.positions;
+        totalUnrealizedProfit = snap.totalUnrealizedProfit;
       }
     }
     const binanceBlocked451 = binanceStatusCode === 451;
     const binanceAuthErr = credsPresent && binanceStatusCode !== 200 && !binanceBlocked451;
 
-    // Reconcile closed / open DB positions with live Binance ONLY when both endpoints returned HTTP 200
+    // Reconcile closed / open DB positions with live Binance ONLY when account endpoints returned HTTP 200
     if (credsPresent && binanceStatusCode === 200) {
       const cfgLev = Math.max(1, Math.min(50, Math.round(Number(botRow.leverage || 5))));
       if (lastSyncedConfigLev !== cfgLev) {
@@ -860,12 +934,16 @@ async function runFastCycle() {
         }
         // Double-check directly per symbol & require 2 consecutive zero-qty checks before cancelling orders or closing DB row
         const chk = await signedBinanceRequest("GET", "/fapi/v2/positionRisk", { symbol: symU });
-        const stillOpen =
-          chk.ok &&
-          Array.isArray(chk.data) &&
-          chk.data.some((px) => Math.abs(Number(px.positionAmt || 0)) > 0);
-        if (stillOpen) {
+        const chkOpenRows =
+          chk.ok && Array.isArray(chk.data)
+            ? chk.data.filter((px) => Math.abs(Number(px.positionAmt || 0)) > 0)
+            : [];
+        if (chkOpenRows.length > 0) {
           closeConfirmCount.delete(symU);
+          for (const px of chkOpenRows) {
+            positions.push(mapBinancePositionRow(px, Math.abs(chkOpenRows.length) === 1 ? totalUnrealizedProfit : 0));
+          }
+          liveSet.add(symU);
           continue;
         }
         if (chk.ok) {
@@ -1008,7 +1086,16 @@ async function runFastCycle() {
       }
     }
 
-    const floating = positions.reduce((s, p) => s + Number(p.unrealizedPnl || 0), 0);
+    const remainingOpenRes = await db.execute(sql`SELECT COUNT(*)::int AS cnt FROM trades WHERE status='OPEN'`);
+    const openDbCount = Number(((remainingOpenRes.rows || [])[0] as any)?.cnt ?? 0);
+    const floating = resolveNextFloatingProfit({
+      credsPresent,
+      snapOk: binanceStatusCode === 200,
+      positions,
+      totalUnrealizedProfit,
+      openDbCount,
+      prevFloating: Number(botRow.floating_profit ?? 0),
+    });
     const todayStr = getPktDateStr();
     const initBal = Number(botRow.initial_balance ?? 0) > 0 ? Number(botRow.initial_balance) : equity || 10000;
     const dmRow = ((

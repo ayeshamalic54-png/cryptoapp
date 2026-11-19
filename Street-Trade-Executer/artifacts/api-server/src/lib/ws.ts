@@ -10,7 +10,7 @@ import {
 } from "@workspace/db";
 import { desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
-import { formatCryptoPrice, parseFavoritePairs, resolveBinanceSymbol } from "./smcEngine";
+import { formatCryptoPrice, parseFavoritePairs, resolveBinanceSymbol, resolveDashboardFloatingProfit } from "./smcEngine";
 import { fetchLivePriceMap } from "../routes/prices";
 
 let wss: WebSocketServer | null = null;
@@ -137,6 +137,8 @@ async function buildDashboardPayload() {
   }
   const activeTelemetry = telemetryMap[activeSym] ?? Object.values(telemetryMap)[0] ?? null;
 
+  const effectiveFloating = resolveDashboardFloatingProfit(botState?.floatingProfit, openPositions);
+
   return {
     systemStatus: botState?.systemStatus ?? "BOT OFFLINE",
     currentPair: activeSym,
@@ -144,7 +146,7 @@ async function buildDashboardPayload() {
     lastUpdate: botState?.updatedAt?.toISOString() ?? null,
     equity: Number(botState?.equity ?? 0),
     drawdownPercent: Number(botState?.drawdownPercent ?? 0),
-    floatingProfit: Number(botState?.floatingProfit ?? 0),
+    floatingProfit: effectiveFloating,
     zScore: 0,
     hedgeRatio: Number(botState?.leverage ?? 5),
     obiA: 0,

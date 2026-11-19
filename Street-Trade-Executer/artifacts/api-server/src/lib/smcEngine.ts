@@ -1365,3 +1365,17 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
     trades: [...trades].reverse().slice(0, 60),
   };
 }
+
+/**
+ * Resolves displayed Floating Open P&L cleanly across WebSocket and REST payloads so a transient
+ * zero on bot_state never flashes $0.00 while open positions carry active unrealized profit.
+ */
+export function resolveDashboardFloatingProfit(
+  rawBotFloat: unknown,
+  openPositions: Array<{ profit?: unknown }>
+): number {
+  if (!Array.isArray(openPositions) || openPositions.length === 0) return 0;
+  const botVal = Number(rawBotFloat ?? 0);
+  if (Math.abs(botVal) > 0.001) return botVal;
+  return Number(openPositions.reduce((sum, p) => sum + Number(p.profit ?? 0), 0).toFixed(2));
+}

@@ -8,7 +8,7 @@ import {
   smcTelemetryTable,
 } from "@workspace/db";
 import { desc, eq } from "drizzle-orm";
-import { analyzeLiveSmcTelemetry, formatCryptoPrice, parseFavoritePairs, resolveBinanceSymbol } from "../lib/smcEngine";
+import { analyzeLiveSmcTelemetry, formatCryptoPrice, parseFavoritePairs, resolveBinanceSymbol, resolveDashboardFloatingProfit } from "../lib/smcEngine";
 import { fetchBinanceKlinesWithMeta, getSymbolMarketType, resolveLiveBinanceSymbol } from "./binance";
 import { fetchLivePriceMap } from "./prices";
 
@@ -136,6 +136,8 @@ router.get("/dashboard", async (req, res) => {
     }
     const activeTelemetry = telemetryMap[activeSym] ?? Object.values(telemetryMap)[0] ?? null;
 
+    const effectiveFloating = resolveDashboardFloatingProfit(botState?.floatingProfit, openPositions);
+
     return res.json({
       systemStatus: botState?.systemStatus ?? "BOT OFFLINE",
       currentPair: activeSym,
@@ -143,7 +145,7 @@ router.get("/dashboard", async (req, res) => {
       lastUpdate: botState?.updatedAt?.toISOString() ?? null,
       equity: Number(botState?.equity ?? 0),
       drawdownPercent: Number(botState?.drawdownPercent ?? 0),
-      floatingProfit: Number(botState?.floatingProfit ?? 0),
+      floatingProfit: effectiveFloating,
       zScore: 0,
       hedgeRatio: Number(botState?.leverage ?? 5),
       obiA: 0,
