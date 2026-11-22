@@ -284,12 +284,17 @@ export function SmcChartOverlay({
         if (parsed?.sl_price && Number(parsed.sl_price) > 0) return Number(parsed.sl_price);
       }
     } catch {}
+    const floorDist = effectiveEntryPrice * (showM1Mode ? 0.0035 : 0.005);
     if (sweepPrice > 0 && Math.abs(effectiveEntryPrice - sweepPrice) >= scaleRef * 0.0005) {
-      return isBearishSetup ? sweepPrice + defaultBuf : sweepPrice - defaultBuf;
+      const rawSl = isBearishSetup ? sweepPrice + defaultBuf : sweepPrice - defaultBuf;
+      if (Math.abs(effectiveEntryPrice - rawSl) < floorDist) {
+        return isBearishSetup ? effectiveEntryPrice + floorDist : effectiveEntryPrice - floorDist;
+      }
+      return rawSl;
     }
-    const estSlDist = scaleRef * 0.006;
+    const estSlDist = Math.max(floorDist, scaleRef * 0.005);
     return isBearishSetup ? effectiveEntryPrice + estSlDist : effectiveEntryPrice - estSlDist;
-  }, [hasActivePosition, activePosition, telemetry, sweepPrice, effectiveEntryPrice, scaleRef, isBearishSetup, defaultBuf]);
+  }, [hasActivePosition, activePosition, telemetry, sweepPrice, effectiveEntryPrice, scaleRef, isBearishSetup, defaultBuf, showM1Mode]);
 
   const effectiveTpPrice = useMemo(() => {
     if (hasActivePosition && activePosition && (Number(activePosition.tp) > 0 || Number(activePosition.tpPrice) > 0)) {
@@ -1056,12 +1061,12 @@ export function SmcChartOverlay({
                 ? `Step 1-4 PASS 🟢 — Step 5 PENDING ⚪: Waiting for Closed ${showM1Mode ? "M1" : "M5"} FVG Retest + Rejection & M15 Alignment`
                 : showM1Mode
                 ? !slTpPass
-                  ? `Step 1-5 PASS 🟢 — Step 6 PENDING ⚪: Verifying Sweep SL Floor (≥0.50%) & M15 Opposing Target`
+                  ? `Step 1-5 PASS 🟢 — Step 6 PENDING ⚪: Verifying M1 Sweep SL (≥0.35%) & M15 Liquidity Target`
                   : "Steps 1-6 VERIFIED 🟢 — Pure M1 LTF Institutional SMC Aligned!"
                 : !s8Pass
                 ? "Step 1-5 PASS 🟢 — Step 6 PENDING 🔴: Structural SL Guard (≥0.50% Floor / Liquidation Cap)"
                 : !s9Pass
-                ? "Step 1-6 PASS 🟢 — Step 7 BLOCKED 🔴: Nearest Unbroken M15 Target < 1.25R / > 3.5R"
+                ? "Step 1-6 PASS 🟢 — Step 7 BLOCKED 🔴: No Unbroken M15 Target ≥ 1.25R / ≤ 3.5R"
                 : "Steps 1-7 VERIFIED 🟢 — Pure M5 Institutional SMC Aligned!"}
             </p>
           </div>
@@ -1743,7 +1748,7 @@ export function SmcChartOverlay({
                   pass: slTpPass,
                   fail: slTpFail,
                   badge: slTpFail ? "FAIL 🔴" : slTpPass ? `LOCKED 🟢 (${effectiveRrr}R)` : "PENDING ⚪",
-                  desc: slTpPass ? `SL $${fmtP(slPrice)} (≥0.50% sweep floor) + M15 TP $${fmtP(tpPrice)} (${effectiveRrr}R, 1.75R cap).` : "Enforces ≥0.50% sweep SL floor & ≥1.25R M15 Opposing Target.",
+                  desc: slTpPass ? `SL $${fmtP(slPrice)} (≥0.35% sweep floor) + M15 TP $${fmtP(tpPrice)} (${effectiveRrr}R, 1.75R cap).` : "Enforces ≥0.35% sweep SL floor & ≥1.25R M15 Opposing Liquidity Target.",
                 },
               ]
             : [

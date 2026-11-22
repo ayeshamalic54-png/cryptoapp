@@ -686,20 +686,22 @@ function computeM15OpposingTarget(
   unbrokenSwings.sort((a, b) => (isBuy ? a - b : b - a));
   if (!unbrokenSwings.length || slDist <= 0) return { tpPrice: 0, rrr: 0 };
 
-  // Evaluate the NEAREST unbroken M15 Draw-on-Liquidity first — never jump past a close wall
-  // to invent an unachievable distant target or blind 3.0R/2.2R math price.
+  // Scan unbroken M15 swing liquidity pools nearest-to-farthest (matching Forex M15 target scan)
+  // so small minor swings < minTargetRrr never block a real outer M15 Draw-on-Liquidity pool.
   const nearestLvl = unbrokenSwings[0]!;
   const frontRunTp = rndPrice(isBuy ? nearestLvl - scale.frontRunBuf : nearestLvl + scale.frontRunBuf, scale.digits);
   const nearestRrr = (isBuy ? frontRunTp - entryPrice : entryPrice - frontRunTp) / slDist;
 
-  if (nearestRrr < minTargetRrr) {
-    return { tpPrice: frontRunTp, rrr: Number(Math.max(0, nearestRrr).toFixed(2)) };
-  }
-  if (nearestRrr <= 3.5) {
-    return { tpPrice: frontRunTp, rrr: Number(nearestRrr.toFixed(2)) };
+  for (let i = 0; i < unbrokenSwings.length; i++) {
+    const lvl = unbrokenSwings[i]!;
+    const candTp = i === 0 ? frontRunTp : rndPrice(isBuy ? lvl - scale.frontRunBuf : lvl + scale.frontRunBuf, scale.digits);
+    const candRrr = (isBuy ? candTp - entryPrice : entryPrice - candTp) / slDist;
+    if (candRrr >= minTargetRrr && candRrr <= 3.5) {
+      return { tpPrice: candTp, rrr: Number(candRrr.toFixed(2)) };
+    }
   }
 
-  // Only if the nearest unbroken swing is > 3.5R away, check a nearer unmitigated M15 OB/Breaker inside [minTargetRrr..3.5R]
+  // Only if unbroken M15 swings do not land in [minTargetRrr..3.5R], check unmitigated M15 OB/Breaker inside range
   const m15Zones = detectSmcZones(dfM15, scale, 0);
   const oppZones = isBuy
     ? [...m15Zones.bearOb.map((z) => z.low), ...m15Zones.bearBreaker.map((z) => z.low)].filter(
@@ -717,7 +719,7 @@ function computeM15OpposingTarget(
     }
   }
 
-  return { tpPrice: frontRunTp, rrr: Number(nearestRrr.toFixed(2)) };
+  return { tpPrice: frontRunTp, rrr: Number(Math.max(0, nearestRrr).toFixed(2)) };
 }
 
 interface SmcClosedEvaluation {
@@ -816,7 +818,8 @@ function finalizeSmcBracket(
   leverage: number,
   minTargetRrr: number,
   scale: CryptoScale,
-  minRawSlPct: number
+  minRawSlPct: number,
+  slFloorPct = 0.5
 ): { s8Ok: boolean; s9Ok: boolean; slPrice: number; tpPrice: number; rrr: number } {
   const rawSlPrice = rndPrice(isBull ? slAnchor - scale.slBuf : slAnchor + scale.slBuf, scale.digits);
   const rawSlDist = isBull ? entryPrice - rawSlPrice : rawSlPrice - entryPrice;
@@ -826,8 +829,8 @@ function finalizeSmcBracket(
     return { s8Ok: false, s9Ok: false, slPrice: 0, tpPrice: 0, rrr: 0 };
   }
 
-  // Widen cleanly to a 0.50% crypto noise breathing floor when maxSl allows (matching backtested edge)
-  const minFloorDist = liqSafe >= 0.5 ? entryPrice * 0.005 : 0;
+  // Enforce mode-calibrated crypto noise breathing floor (0.35% M1 LTF / 0.50% M5 Strict) when maxSl allows
+  const minFloorDist = liqSafe >= slFloorPct ? entryPrice * (slFloorPct / 100) : 0;
   const slPrice =
     rawSlDist < minFloorDist
       ? rndPrice(isBull ? entryPrice - minFloorDist : entryPrice + minFloorDist, scale.digits)
@@ -835,7 +838,7 @@ function finalizeSmcBracket(
   const slDist = isBull ? entryPrice - slPrice : slPrice - entryPrice;
   const s8Ok = slDist > 0;
 
-  const targ = computeM15OpposingTarget(isBull, m15Bars, entryPrice, rawSlDist, minTargetRrr, scale);
+  const targ = computeM15OpposingTarget(isBull, m15Bars, entryPrice, slDist, minTargetRrr, scale);
   const rawTpDist = Math.abs(targ.tpPrice - entryPrice);
   const cappedTpDist = Math.min(rawTpDist, slDist * 1.75);
   const finalTpPrice = rndPrice(isBull ? entryPrice + cappedTpDist : entryPrice - cappedTpDist, scale.digits);
@@ -878,7 +881,7 @@ interface M1LtfEvaluation {
 /**
  * Evaluates M1 LTF Execution Refinement following a confirmed M5 Liquidity Sweep:
  * M15 Bias -> M5 Sweep -> M1 CHoCH -> M1 Displacement FVG -> Closed M1 FVG Retest & Rejection
- * -> 1m Rejection Follow-Through Hold -> 0.50% Crypto Sweep SL Floor -> M15 Opposing Unbroken Liquidity Target.
+ * -> 1m Rejection Follow-Through Hold -> 0.35% M1 Sweep SL Floor -> M15 Opposing Unbroken Liquidity Target.
  */
 function evaluateM1LtfRefinement(
   isBull: boolean,
@@ -1071,23 +1074,18 @@ function evaluateM1LtfRefinement(
       }
 
       if (s7Ok) {
-        const slAnchor = computeProtectedSweepAnchor(
-          m5ClosedBars,
-          m5ClosedBars.length - 1,
-          trueExtreme,
-          isBull,
-          scale
-        );
+        // Anchor directly behind the M1/M5 sweep extreme (matching Forex M1 LTF precision) with a 0.35% crypto noise floor
         const bracket = finalizeSmcBracket(
           isBull,
-          slAnchor,
+          trueExtreme,
           entryPrice,
           m15Bars,
           maxSlPct,
           leverage,
           minTargetRrr,
           scale,
-          0.25
+          0.25,
+          0.35
         );
         slPrice = bracket.slPrice;
         tpPrice = bracket.tpPrice;
@@ -1342,8 +1340,15 @@ export function analyzeLiveSmcTelemetry(
   const sweepKey = hasSweep && swTime > 0 ? `${isBull ? "B" : "S"}:${swTime}` : "";
 
   if (tpPrice <= 0 && (isBull || isBear)) {
-    const estAnchor = hasSweep ? computeProtectedSweepAnchor(closedBars, closedIdx, sw.sweepExtreme, isBull, scale) : 0;
-    const estSlDist = hasSweep ? Math.abs(livePrice - estAnchor) + scale.slBuf : livePrice * 0.005;
+    const estAnchor = hasSweep
+      ? useM1Telemetry
+        ? sw.sweepExtreme
+        : computeProtectedSweepAnchor(closedBars, closedIdx, sw.sweepExtreme, isBull, scale)
+      : 0;
+    const minEstFloor = useM1Telemetry ? livePrice * 0.0035 : livePrice * 0.005;
+    const estSlDist = hasSweep
+      ? Math.max(minEstFloor, Math.abs(livePrice - estAnchor) + scale.slBuf)
+      : minEstFloor;
     if (estSlDist > 0) {
       const est = computeM15OpposingTarget(isBull, m15Bars, livePrice, estSlDist, minTargetRrr, scale);
       tpPrice = est.tpPrice;
