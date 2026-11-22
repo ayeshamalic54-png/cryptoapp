@@ -534,9 +534,49 @@ export function SmcChartOverlay({
     const lowest = Math.min(...completed.map((c) => c.low));
     const swingHigh = sweepPrice > 0 && isBearishSetup ? sweepPrice : highest;
     const swingLow = sweepPrice > 0 && isBullishSetup ? sweepPrice : lowest;
-    const chochLvl = (s2Pass || s3Pass || isTradeActive) && chochPrice > 0 ? chochPrice : 0;
+    let chochLvl = (s2Pass || s3Pass || isTradeActive) && chochPrice > 0 ? chochPrice : 0;
+    if (chochLvl <= 0 && completed.length >= 6) {
+      // Derive real interior fractal swing pivot (CHoCH watch level) from closed candles when S2/S3 are pending
+      const highs: Array<[number, number]> = [];
+      const lows: Array<[number, number]> = [];
+      for (let i = 2; i < completed.length - 2; i++) {
+        const cur = completed[i]!;
+        let isH = true;
+        let isL = true;
+        for (let k = 1; k <= 2; k++) {
+          if (completed[i - k]!.high > cur.high || completed[i + k]!.high > cur.high) isH = false;
+          if (completed[i - k]!.low < cur.low || completed[i + k]!.low < cur.low) isL = false;
+        }
+        if (isH) highs.push([cur.high, i]);
+        if (isL) lows.push([cur.low, i]);
+      }
+      const sepTol = scaleRef * 0.0005;
+      const pickInterior = (arr: Array<[number, number]>) => {
+        for (let i = arr.length - 1; i >= 0; i--) {
+          const p = arr[i]![0];
+          if (Math.abs(p - swingHigh) > sepTol && Math.abs(p - swingLow) > sepTol) return p;
+        }
+        return arr.length ? arr[arr.length - 1]![0] : 0;
+      };
+      if (isM15Bullish) {
+        chochLvl = pickInterior(highs);
+      } else if (isM15Bearish) {
+        chochLvl = pickInterior(lows);
+      } else {
+        const lastH = highs.length ? highs[highs.length - 1]! : null;
+        const lastL = lows.length ? lows[lows.length - 1]! : null;
+        const preferHigh = lastH && (!lastL || lastH[1] >= lastL[1]);
+        chochLvl = preferHigh ? pickInterior(highs) : pickInterior(lows);
+      }
+      if (chochLvl <= 0) {
+        const recent = completed.slice(-8, -1);
+        if (recent.length > 0) {
+          chochLvl = isM15Bearish ? Math.min(...recent.map((c) => c.low)) : Math.max(...recent.map((c) => c.high));
+        }
+      }
+    }
     return { swingHigh, swingLow, chochLvl };
-  }, [candles, sweepPrice, chochPrice, s2Pass, s3Pass, isTradeActive, isBullishSetup, isBearishSetup]);
+  }, [candles, sweepPrice, chochPrice, s2Pass, s3Pass, isTradeActive, isBullishSetup, isBearishSetup, isM15Bullish, isM15Bearish, scaleRef]);
 
   const svgWidth = Math.max(320, containerWidth);
   const svgHeight = isMobile ? 440 : 475;
@@ -1036,9 +1076,9 @@ export function SmcChartOverlay({
               Sweep: ${fmtP(sweepPrice)}
             </div>
           )}
-          {(s2Pass || s3Pass || isTradeActive) && chochPrice > 0 && (
+          {swingStructure.chochLvl > 0 && (
             <div className={cn("px-3 py-1 rounded border font-bold", s3Pass ? "bg-amber-950 border-amber-400 text-amber-200" : "bg-amber-950/60 border-amber-600/60 text-amber-300")}>
-              {s3Pass ? "CHoCH" : "CHoCH Trigger"}: ${fmtP(chochPrice)}
+              {s3Pass ? "CHoCH" : s2Pass ? "CHoCH Trigger" : "CHoCH Lvl"}: ${fmtP(swingStructure.chochLvl)}
             </div>
           )}
           {isTradeActive ? (
