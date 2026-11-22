@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { analyzeLiveSmcTelemetry, resolveBinanceSymbol, type OhlcBar } from "../lib/smcEngine";
+import { getHostCooldownState, recordBinanceResponse } from "../lib/binanceRateLimit";
 
 const router = Router();
 
@@ -55,8 +56,15 @@ function parseExchangeSymbols(json: { symbols?: any[] }, marketType: "FUTURES" |
 }
 
 async function fetchJsonSafe(url: string, timeoutMs = 7000): Promise<any | null> {
+  if (getHostCooldownState(url).coolingDown) return null;
   try {
     const resp = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    recordBinanceResponse(
+      url,
+      resp.status,
+      resp.headers.get("retry-after"),
+      resp.headers.get("x-mbx-used-weight-1m")
+    );
     if (!resp.ok) return null;
     return await resp.json();
   } catch {
@@ -159,43 +167,74 @@ function mapRawKlines(raw: any[], priceScale = 1): OhlcBar[] {
   }));
 }
 
+type KlineMetaResult = { bars: OhlcBar[]; resolvedSymbol: string; marketType: "FUTURES" | "SPOT" };
+const klineCache = new Map<string, { ts: number; data: KlineMetaResult }>();
+const inFlightKlines = new Map<string, Promise<KlineMetaResult>>();
+const KLINE_CACHE_TTL_MS = 12_000;
+
 export async function fetchBinanceKlinesWithMeta(
   symbol: string,
   interval: "5m" | "15m",
   limit = 120
-): Promise<{ bars: OhlcBar[]; resolvedSymbol: string; marketType: "FUTURES" | "SPOT" }> {
+): Promise<KlineMetaResult> {
   const sym = await resolveLiveBinanceSymbol(symbol);
-  const endpoints = [...new Set([getBinanceBaseUrl(), "https://fapi.binance.com"])];
-  for (const base of endpoints) {
-    const raw = await fetchJsonSafe(
-      `${base}/fapi/v1/klines?symbol=${encodeURIComponent(sym)}&interval=${interval}&limit=${limit}`,
-      7000
-    );
-    if (Array.isArray(raw) && raw.length > 0) {
-      return { bars: mapRawKlines(raw, 1), resolvedSymbol: sym, marketType: "FUTURES" };
-    }
+  const cacheKey = `${getBinanceBaseUrl()}|${sym}|${interval}|${limit}`;
+  const cached = klineCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < KLINE_CACHE_TTL_MS && cached.data.bars.length > 0) {
+    return cached.data;
   }
+  const existingFlight = inFlightKlines.get(cacheKey);
+  if (existingFlight) return existingFlight;
 
-  // Geo-block / Testnet unlisted fallback via Binance Vision public CDN
-  const catalogType = await getSymbolMarketType(sym);
-  const spotRaw = await fetchJsonSafe(
-    `https://data-api.binance.vision/api/v3/klines?symbol=${encodeURIComponent(sym)}&interval=${interval}&limit=${limit}`,
-    7000
-  );
-  if (Array.isArray(spotRaw) && spotRaw.length > 0) {
-    return { bars: mapRawKlines(spotRaw, 1), resolvedSymbol: sym, marketType: catalogType };
-  }
-  if (sym.startsWith("1000")) {
-    const stripped = sym.slice(4);
-    const kRaw = await fetchJsonSafe(
-      `https://data-api.binance.vision/api/v3/klines?symbol=${encodeURIComponent(stripped)}&interval=${interval}&limit=${limit}`,
+  const task = (async (): Promise<KlineMetaResult> => {
+    const endpoints = [...new Set([getBinanceBaseUrl(), "https://fapi.binance.com"])];
+    for (const base of endpoints) {
+      if (getHostCooldownState(base).coolingDown) continue;
+      const raw = await fetchJsonSafe(
+        `${base}/fapi/v1/klines?symbol=${encodeURIComponent(sym)}&interval=${interval}&limit=${limit}`,
+        7000
+      );
+      if (Array.isArray(raw) && raw.length > 0) {
+        const res: KlineMetaResult = { bars: mapRawKlines(raw, 1), resolvedSymbol: sym, marketType: "FUTURES" };
+        klineCache.set(cacheKey, { ts: Date.now(), data: res });
+        return res;
+      }
+    }
+
+    // Geo-block / Testnet unlisted fallback via Binance Vision public CDN
+    const catalogType = await getSymbolMarketType(sym);
+    const spotRaw = await fetchJsonSafe(
+      `https://data-api.binance.vision/api/v3/klines?symbol=${encodeURIComponent(sym)}&interval=${interval}&limit=${limit}`,
       7000
     );
-    if (Array.isArray(kRaw) && kRaw.length > 0) {
-      return { bars: mapRawKlines(kRaw, 1000), resolvedSymbol: sym, marketType: "FUTURES" };
+    if (Array.isArray(spotRaw) && spotRaw.length > 0) {
+      const res: KlineMetaResult = { bars: mapRawKlines(spotRaw, 1), resolvedSymbol: sym, marketType: catalogType };
+      klineCache.set(cacheKey, { ts: Date.now(), data: res });
+      return res;
     }
-  }
-  return { bars: [], resolvedSymbol: sym, marketType: catalogType };
+    if (sym.startsWith("1000")) {
+      const stripped = sym.slice(4);
+      const kRaw = await fetchJsonSafe(
+        `https://data-api.binance.vision/api/v3/klines?symbol=${encodeURIComponent(stripped)}&interval=${interval}&limit=${limit}`,
+        7000
+      );
+      if (Array.isArray(kRaw) && kRaw.length > 0) {
+        const res: KlineMetaResult = { bars: mapRawKlines(kRaw, 1000), resolvedSymbol: sym, marketType: "FUTURES" };
+        klineCache.set(cacheKey, { ts: Date.now(), data: res });
+        return res;
+      }
+    }
+    return cached?.data ?? { bars: [], resolvedSymbol: sym, marketType: catalogType };
+  })().finally(() => {
+    inFlightKlines.delete(cacheKey);
+    if (klineCache.size > 300) {
+      const oldestKey = klineCache.keys().next().value;
+      if (oldestKey) klineCache.delete(oldestKey);
+    }
+  });
+
+  inFlightKlines.set(cacheKey, task);
+  return task;
 }
 
 export async function fetchBinanceKlines(symbol: string, interval: "5m" | "15m", limit = 120): Promise<OhlcBar[]> {

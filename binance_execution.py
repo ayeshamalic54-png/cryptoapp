@@ -190,14 +190,25 @@ def round_to_step_size(qty: float, step_size: float, up: bool = False) -> float:
     return float(d_qty.quantize(d_step, rounding=mode))
 
 
+STABLECOIN_ASSETS = {"USDT", "USDC", "FDUSD", "BUSD", "TUSD", "USDP"}
+
+
 def get_binance_usdt_balance():
-    """Returns (total_equity_usdt, available_balance_usdt)."""
+    """Returns (stablecoin_equity_usd, available_balance_usd) excluding volatile BTC/BNB collateral."""
     try:
         r = send_signed_request("GET", "/fapi/v2/account", {})
         if r.status_code == 200:
             data = r.json()
-            wallet = float(data.get("totalWalletBalance", 0.0) or 0.0)
+            assets = data.get("assets") or []
+            stable_assets = [a for a in assets if str(a.get("asset", "")).upper() in STABLECOIN_ASSETS]
+            stable_wallet = sum(float(a.get("walletBalance", 0.0) or 0.0) for a in stable_assets)
             unreal = float(data.get("totalUnrealizedProfit", 0.0) or 0.0)
+            if stable_assets and stable_wallet > 0:
+                eq = stable_wallet + unreal
+                raw_avail = float(data.get("availableBalance", eq) or eq)
+                return round(eq, 4), round(min(raw_avail, max(0.0, eq)), 4)
+
+            wallet = float(data.get("totalWalletBalance", 0.0) or 0.0)
             margin_bal = float(data.get("totalMarginBalance", wallet + unreal) or (wallet + unreal))
             avail = float(data.get("availableBalance", wallet) or wallet)
             return round(margin_bal, 4), round(avail, 4)

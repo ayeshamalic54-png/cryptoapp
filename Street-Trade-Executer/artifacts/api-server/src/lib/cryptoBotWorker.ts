@@ -22,6 +22,7 @@ import {
 } from "./smcEngine";
 import { fetchBinanceKlines, isSymbolTradableOnVenue, resolveLiveBinanceSymbol, TOP_10_CRYPTO_COINS } from "../routes/binance";
 import { postDiscordPayload, sendDiscordCryptoCloseAlert, sendDiscordCryptoSignalAlert } from "./discord";
+import { getHostCooldownState, recordBinanceResponse } from "./binanceRateLimit";
 import { logger } from "./logger";
 
 interface SymbolFilter {
@@ -91,6 +92,16 @@ async function signedBinanceRequest(
   if (!key || !secret) {
     return { status: 0, ok: false, data: null, text: "Missing Binance API keys" };
   }
+  const base = getBaseUrl();
+  const cd = getHostCooldownState(base);
+  if (cd.coolingDown) {
+    return {
+      status: cd.status || 429,
+      ok: false,
+      data: null,
+      text: `Binance rate-limit cooldown active (${Math.ceil(cd.remainingMs / 1000)}s remaining)`,
+    };
+  }
   if (!timeSynced) await syncBinanceTime();
 
   const buildUrl = () => {
@@ -100,23 +111,37 @@ async function signedBinanceRequest(
     usp.set("recvWindow", "10000");
     const qs = usp.toString();
     const sig = crypto.createHmac("sha256", secret).update(qs).digest("hex");
-    return `${getBaseUrl()}${endpoint}?${qs}&signature=${sig}`;
+    return `${base}${endpoint}?${qs}&signature=${sig}`;
   };
 
   try {
-    let resp = await fetch(buildUrl(), {
+    const reqUrl = buildUrl();
+    let resp = await fetch(reqUrl, {
       method,
       headers: { "X-MBX-APIKEY": key },
       signal: AbortSignal.timeout(10000),
     });
+    recordBinanceResponse(
+      reqUrl,
+      resp.status,
+      resp.headers.get("retry-after"),
+      resp.headers.get("x-mbx-used-weight-1m")
+    );
     let text = await resp.text();
     if (resp.status === 400 && text.includes("-1021")) {
       await syncBinanceTime();
-      resp = await fetch(buildUrl(), {
+      const retryUrl = buildUrl();
+      resp = await fetch(retryUrl, {
         method,
         headers: { "X-MBX-APIKEY": key },
         signal: AbortSignal.timeout(10000),
       });
+      recordBinanceResponse(
+        retryUrl,
+        resp.status,
+        resp.headers.get("retry-after"),
+        resp.headers.get("x-mbx-used-weight-1m")
+      );
       text = await resp.text();
     }
     let data: any = null;
@@ -212,23 +237,43 @@ export async function syncLeverageAcrossCoins(targetLev: number, extraSymbol?: s
   logger.info({ leverage: lev, symbols: list.length }, "Synced Binance Futures leverage across scanner coins");
 }
 
+const STABLECOIN_ASSETS = new Set(["USDT", "USDC", "FDUSD", "BUSD", "TUSD", "USDP"]);
+
 /**
- * Extracts full Binance Futures wallet, equity (totalMarginBalance), and available margin
- * across all Multi-Asset / USDT collateral so USDC/BNB/BTC margin assets are never dropped.
+ * Computes Futures walletBalance, equity, and available balance from USD-pegged stablecoins
+ * (USDT + USDC + FDUSD + BUSD + TUSD + USDP) plus live unrealized P&L.
+ * Excludes volatile non-stablecoin spot/collateral holdings (e.g. 0.01 BTC on Testnet) so
+ * reported equity never drifts up/down with coin prices when zero trades are running.
  */
 export function extractAccountSnapshotBalances(accData: any): { walletBalance: number; equity: number; avail: number } {
-  const wallet = Number(accData?.totalWalletBalance ?? 0);
+  const assets = Array.isArray(accData?.assets) ? accData.assets : [];
+  const stableAssets = assets.filter((a: any) =>
+    STABLECOIN_ASSETS.has(String(a?.asset || "").toUpperCase())
+  );
+  const stableWalletSum = stableAssets.reduce((sum: number, a: any) => sum + Number(a?.walletBalance ?? 0), 0);
   const unreal = Number(accData?.totalUnrealizedProfit ?? 0);
+
+  const rawWallet = Number(accData?.totalWalletBalance ?? 0);
   const rawMarginBal = Number(accData?.totalMarginBalance ?? 0);
-  const marginBal = rawMarginBal > 0 ? rawMarginBal : wallet + unreal;
-  const usdtAsset = Array.isArray(accData?.assets)
-    ? accData.assets.find((a: any) => String(a.asset || "").toUpperCase() === "USDT")
-    : null;
   const topAvail = Number(accData?.availableBalance ?? 0);
+  const usdtAsset = stableAssets.find((a: any) => String(a?.asset || "").toUpperCase() === "USDT");
   const usdtAvail = Number(usdtAsset?.availableBalance ?? 0);
-  const avail = topAvail > 0 ? topAvail : usdtAvail > 0 ? usdtAvail : wallet;
+
+  if (stableAssets.length > 0 && stableWalletSum > 0) {
+    const eq = stableWalletSum + unreal;
+    const rawAvail = topAvail > 0 ? topAvail : usdtAvail > 0 ? usdtAvail : eq;
+    const avail = Math.min(rawAvail, Math.max(0, eq));
+    return {
+      walletBalance: Number(stableWalletSum.toFixed(2)),
+      equity: Number(eq.toFixed(2)),
+      avail: Number(avail.toFixed(2)),
+    };
+  }
+
+  const marginBal = rawMarginBal > 0 ? rawMarginBal : rawWallet + unreal;
+  const avail = topAvail > 0 ? topAvail : usdtAvail > 0 ? usdtAvail : rawWallet;
   return {
-    walletBalance: Number(wallet.toFixed(2)),
+    walletBalance: Number(rawWallet.toFixed(2)),
     equity: Number(marginBal.toFixed(2)),
     avail: Number(avail.toFixed(2)),
   };
@@ -287,10 +332,7 @@ async function getAccountSnapshot(): Promise<{
   positions: any[];
   statusCode: number;
 }> {
-  const [accRes, posRes] = await Promise.all([
-    signedBinanceRequest("GET", "/fapi/v2/account"),
-    signedBinanceRequest("GET", "/fapi/v2/positionRisk"),
-  ]);
+  const accRes = await signedBinanceRequest("GET", "/fapi/v2/account");
   if (!accRes.ok) {
     return { equity: 0, avail: 0, totalUnrealizedProfit: 0, positions: [], statusCode: accRes.status || 502 };
   }
@@ -305,6 +347,12 @@ async function getAccountSnapshot(): Promise<{
       }
     }
   }
+
+  // Only query bulk /fapi/v2/positionRisk (weight 5) when an active position exists to get live markPrice
+  const posRes =
+    accPosBySym.size > 0
+      ? await signedBinanceRequest("GET", "/fapi/v2/positionRisk")
+      : { ok: false, data: null };
 
   const posBySym = new Map<string, any>();
   if (posRes.ok && Array.isArray(posRes.data)) {
@@ -851,16 +899,28 @@ export function computeDrawdownMetrics(
 async function reconcileRecentClosedDiscrepancies() {
   if (!hasApiCreds()) return;
   try {
-    // Heal any impossible daily_metrics drawdown spike caused by brief multi-asset snapshot mismatch
+    // Heal any impossible daily_metrics drawdown spike or zero-trade multi-asset BTC baseline skew
     const snap = await getAccountSnapshot();
     if (snap.statusCode === 200 && snap.equity > 0) {
       const todayStr = getPktDateStr();
-      const botRow = ((await db.execute(sql`SELECT initial_balance FROM bot_state ORDER BY id ASC LIMIT 1`)).rows || [])[0] as any;
-      const dmRow = ((await db.execute(sql`SELECT start_equity, max_drawdown_percent FROM daily_metrics WHERE trading_date=${todayStr} AND COALESCE(mt5_login,0)=0 LIMIT 1`)).rows || [])[0] as any;
+      const botRow = ((await db.execute(sql`SELECT id, initial_balance, max_equity_peak, metrics_reset_at FROM bot_state ORDER BY id ASC LIMIT 1`)).rows || [])[0] as any;
+      const dmRow = ((await db.execute(sql`SELECT start_equity, max_drawdown_percent, trades_today FROM daily_metrics WHERE trading_date=${todayStr} AND COALESCE(mt5_login,0)=0 LIMIT 1`)).rows || [])[0] as any;
       const initBal = Number(botRow?.initial_balance ?? 0) > 0 ? Number(botRow.initial_balance) : snap.equity;
       const startEq = Number(dmRow?.start_equity ?? 0);
       const recordedMaxDd = Number(dmRow?.max_drawdown_percent ?? 0);
-      if (startEq > 0 && recordedMaxDd > 20 && snap.equity / startEq > 0.85) {
+      const dmTradesToday = Number(dmRow?.trades_today ?? 0);
+
+      if (dmRow && dmTradesToday === 0 && snap.positions.length === 0 && Math.abs(startEq - snap.equity) > 50) {
+        await db.execute(
+          sql`UPDATE daily_metrics
+              SET start_equity=${snap.equity.toString()},
+                  current_equity=${snap.equity.toString()},
+                  max_drawdown_percent=0,
+                  updated_at=NOW()
+              WHERE trading_date=${todayStr} AND COALESCE(mt5_login,0)=0`
+        );
+        logger.info({ todayStr, prevStartEq: startEq, stableEquity: snap.equity }, "Aligned today daily_metrics baseline to stablecoin equity (0 trades)");
+      } else if (startEq > 0 && recordedMaxDd > 20 && snap.equity / startEq > 0.85) {
         const { dailyDdPct } = computeDrawdownMetrics(snap.equity, initBal, startEq);
         await db.execute(
           sql`UPDATE daily_metrics
@@ -870,6 +930,28 @@ async function reconcileRecentClosedDiscrepancies() {
               WHERE trading_date=${todayStr} AND COALESCE(mt5_login,0)=0`
         );
         logger.info({ todayStr, prevMaxDd: recordedMaxDd, healedDd: dailyDdPct, equity: snap.equity }, "Healed spurious daily_metrics drawdown spike");
+      }
+
+      if (botRow?.id && snap.positions.length === 0) {
+        const recordedPeak = Number(botRow.max_equity_peak ?? 0);
+        const resetAt = botRow.metrics_reset_at ? new Date(botRow.metrics_reset_at) : null;
+        const closedProfitsRes = resetAt
+          ? await db.execute(sql`SELECT profit FROM trades WHERE status='CLOSED' AND close_time >= ${resetAt.toISOString()} ORDER BY close_time ASC`)
+          : await db.execute(sql`SELECT profit FROM trades WHERE status='CLOSED' ORDER BY close_time ASC`);
+        let runningEq = initBal;
+        let realizedPeak = Math.max(initBal, snap.equity);
+        for (const cr of (closedProfitsRes.rows || []) as any[]) {
+          runningEq += Number(cr.profit ?? 0);
+          if (runningEq > realizedPeak) realizedPeak = runningEq;
+        }
+        if (recordedPeak - realizedPeak > 50) {
+          const cleanPeak = Number(realizedPeak.toFixed(2));
+          peakEquityTracker = cleanPeak;
+          await db.execute(
+            sql`UPDATE bot_state SET max_equity_peak=${cleanPeak.toString()}, updated_at=NOW() WHERE id=${Number(botRow.id)}`
+          );
+          logger.info({ prevPeak: recordedPeak, cleanPeak }, "Cleared non-stablecoin collateral inflation from max_equity_peak");
+        }
       }
     }
 
@@ -1198,8 +1280,13 @@ async function runFastCycle() {
     const riskEnabled = Boolean(botRow.risk_limits_enabled ?? true);
     const isHalted = riskEnabled && (dailyDdPct >= haltDd || (accMode === "PROP_FIRM" && overallDdPct >= 7.2));
     const isRunning = Boolean(botRow.is_bot_running ?? true);
+    const rateCooldown = getHostCooldownState(getBaseUrl());
+    const binanceRateLimited = binanceStatusCode === 418 || binanceStatusCode === 429 || rateCooldown.coolingDown;
+    const cooldownSecs = Math.max(1, Math.ceil((rateCooldown.remainingMs || 60_000) / 1000));
     const sysStatus = binanceBlocked451
       ? "BLOCKED (Binance US IP 451 — Deploy Render Singapore)"
+      : binanceRateLimited
+      ? `COOLDOWN (Binance ${binanceStatusCode === 418 || rateCooldown.status === 418 ? 418 : 429} Rate Limit — Retry ${cooldownSecs}s)`
       : binanceAuthErr
       ? `API ERR (Binance HTTP ${binanceStatusCode} — Check Keys/Testnet)`
       : !isRunning
@@ -1407,8 +1494,17 @@ async function runSmcScanCycle() {
     let bestCandidate: { sym: string; evalRes: ReturnType<typeof analyzeLiveSmcTelemetry> } | null = null;
     let bestScore = -1;
 
-    for (const sym of scanList) {
+    if (getHostCooldownState(getBaseUrl()).softThrottled) {
+      logger.info("Skipping background SMC kline scan briefly while Binance API weight cools down");
+      return;
+    }
+
+    for (let i = 0; i < scanList.length; i++) {
+      const sym = scanList[i]!;
       const evaluated = await evaluateAndPersistSymbolSmc(sym, maxSlPct, leverage, openTradeMap);
+      if (i < scanList.length - 1) {
+        await new Promise((r) => setTimeout(r, 120));
+      }
       if (!evaluated) continue;
       const { evalRes } = evaluated;
       const t = evalRes.telemetry as any;
@@ -1546,6 +1642,6 @@ export function startCryptoBotWorker() {
     void runSmcScanCycle();
   }, 1500);
 
-  setInterval(() => void runFastCycle(), 4500);
-  setInterval(() => void runSmcScanCycle(), 14000);
+  setInterval(() => void runFastCycle(), 9000);
+  setInterval(() => void runSmcScanCycle(), 25000);
 }
