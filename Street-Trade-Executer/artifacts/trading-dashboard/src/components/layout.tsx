@@ -47,7 +47,7 @@ export function Layout({ children }: LayoutProps) {
           <h1 className="font-extrabold text-sm bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent tracking-tight">
             CRYPTO FUTURES SMC
           </h1>
-          <div className="text-[9px] text-zinc-500 uppercase tracking-widest font-mono">Binance 9-Step Pure SMC</div>
+          <div className="text-[9px] text-zinc-500 uppercase tracking-widest font-mono">Binance M1/M5 Pure SMC</div>
         </div>
         <button
           onClick={() => setIsMobileMenuOpen(true)}
@@ -105,7 +105,7 @@ export function Layout({ children }: LayoutProps) {
             CRYPTO FUTURES SMC
           </h1>
           <div className="text-[10px] text-zinc-500 uppercase tracking-widest font-mono mt-1">
-            Binance 9-Step Pure SMC
+            Binance M1/M5 Pure SMC
           </div>
         </div>
         <nav className="flex-1 p-3 space-y-1.5">

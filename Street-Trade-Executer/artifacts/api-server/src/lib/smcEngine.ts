@@ -1251,6 +1251,7 @@ export function analyzeLiveSmcTelemetry(
       tpPrice: 0,
       rrr: 0,
       stepProgress: 0,
+      stepTotal: 7,
       executionMode: "M5_STRICT" as const,
       sweepKey: "",
     };
@@ -1267,15 +1268,34 @@ export function analyzeLiveSmcTelemetry(
   const { m15Bias, isBull, isBear, hasSweep, sw } = ev;
   let { chochOk, chochLvl, chochIdx, fvgOk, legFvgs, retestOk, s6Ok, s7Ok, s8Ok, s9Ok, slPrice, tpPrice, rrr, action } = ev;
 
-  const m5StepProgress = [isBull || isBear, hasSweep, chochOk, fvgOk, retestOk, s6Ok, s7Ok, s8Ok, s9Ok].filter(Boolean).length;
+  const m5StreamlinedScore = [
+    isBull || isBear,
+    hasSweep,
+    chochOk,
+    fvgOk,
+    retestOk && s6Ok && s7Ok,
+    s8Ok,
+    s9Ok,
+  ].filter(Boolean).length;
   const m1ClosedBars = m1Bars && m1Bars.length > 25 ? m1Bars.slice(0, -1) : m1Bars ?? [];
   const m1Ev =
     ev.action === "NONE" && (isBull || isBear) && hasSweep && m1ClosedBars.length >= 25
       ? evaluateM1LtfRefinement(isBull, closedBars, m15Bars, m1ClosedBars, sw, livePrice, maxSlPct, leverage, minTargetRrr, scale)
       : null;
 
+  const m1StreamlinedScore = m1Ev
+    ? [
+        true,
+        true,
+        m1Ev.hasM1Choch,
+        m1Ev.m1Fvgs.length > 0,
+        m1Ev.hasM1Retest && m1Ev.hasM1Rej && m1Ev.s7Ok,
+        m1Ev.s8Ok && m1Ev.s9Ok,
+      ].filter(Boolean).length
+    : 0;
+
   const useM1Telemetry = Boolean(
-    m1Ev && (m1Ev.action !== "NONE" || !ev.chochOk || m1Ev.stepProgress >= m5StepProgress)
+    m1Ev && (m1Ev.action !== "NONE" || !ev.chochOk || m1StreamlinedScore / 6 >= m5StreamlinedScore / 7)
   );
   if (useM1Telemetry && m1Ev) {
     chochOk = m1Ev.hasM1Choch;
@@ -1385,7 +1405,11 @@ export function analyzeLiveSmcTelemetry(
   pushZones(allZones.bullBreaker, "BULLISH_BREAKER", "BREAKER", true);
   pushZones(allZones.bearBreaker, "BEARISH_BREAKER", "BREAKER", false);
 
-  const stepProgress = [isBull || isBear, hasSweep, chochOk, fvgOk, retestOk, s6Ok, s7Ok, s8Ok, s9Ok].filter(Boolean).length;
+  const stepTotal = useM1Telemetry ? 6 : 7;
+  const closedRejConfirmed = fvgOk && (s7Ok || (retestOk && s6Ok));
+  const stepProgress = useM1Telemetry
+    ? [isBull || isBear, hasSweep, chochOk, fvgOk, closedRejConfirmed, s8Ok && s9Ok].filter(Boolean).length
+    : [isBull || isBear, hasSweep, chochOk, fvgOk, closedRejConfirmed, s8Ok, s9Ok].filter(Boolean).length;
   const rawZones: Array<{ zoneType: string; low: number; high: number }> = [];
   const pushRaw = (items: ZoneBox[], zoneType: string) => {
     for (const item of items) {
@@ -1407,6 +1431,7 @@ export function analyzeLiveSmcTelemetry(
     tpPrice,
     rrr,
     stepProgress,
+    stepTotal,
     executionMode,
     sweepKey,
     rawZones,
@@ -1433,6 +1458,7 @@ export function analyzeLiveSmcTelemetry(
         opposing_tp: tpPrice,
         sl_price: slPrice,
         step_progress: stepProgress,
+        step_total: stepTotal,
         execution_mode: executionMode,
         m1_active: useM1Telemetry,
         sweep_key: sweepKey,

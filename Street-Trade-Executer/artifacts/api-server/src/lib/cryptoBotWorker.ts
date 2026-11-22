@@ -1499,7 +1499,7 @@ export async function evaluateAndPersistSymbolSmc(
       : biasStr.includes("BEARISH")
       ? "BEAR_BIAS"
       : "NEUTRAL";
-  const pctScore = Number(((evalRes.stepProgress / 9) * 100).toFixed(2));
+  const pctScore = Number(((evalRes.stepProgress / Math.max(1, evalRes.stepTotal ?? 7)) * 100).toFixed(2));
   const tpCol = evalRes.tpPrice > 0 ? evalRes.tpPrice : evalRes.livePrice;
 
   await db.execute(

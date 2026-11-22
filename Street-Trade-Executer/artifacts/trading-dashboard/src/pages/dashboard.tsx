@@ -515,7 +515,7 @@ export default function Dashboard() {
           />
         </Card>
 
-        {/* FULL PURE SMC LIVE CHART & 9-STEP HUD */}
+        {/* FULL PURE SMC LIVE CHART & 6/7-STEP FOREX-ALIGNED HUD */}
         <SmcChartOverlay
           symbol={resolvedChartSymbol}
           telemetry={effectiveTelemetry}
@@ -546,7 +546,7 @@ export default function Dashboard() {
             <CardContent>
               {activePositions.length === 0 ? (
                 <div className="text-sm text-muted-foreground py-8 text-center border border-dashed border-border rounded font-mono">
-                  No open Binance Futures position — scanning Top 10 coins for 9/9 SMC Confluence
+                  No open Binance Futures position — scanning Top 10 coins for Pure M1/M5 SMC Confluence
                 </div>
               ) : (
                 <div className="overflow-x-auto">
@@ -751,7 +751,13 @@ export default function Dashboard() {
                           <TableCell className="font-mono text-xs text-right">${formatCryptoPrice(a.priceA)}</TableCell>
                           <TableCell className="font-mono text-xs text-right text-emerald-400">${formatCryptoPrice(a.priceB)}</TableCell>
                           <TableCell className="font-mono text-xs text-right">
-                            {Math.round((Number(a.winRate || 0) / 100) * 9)} / 9 Steps
+                            {(() => {
+                              const rTel = dashboard?.smcTelemetryAll?.[symU];
+                              const rCho = String(rTel?.choch_status ?? "");
+                              const rM1 = Boolean(rTel?.execution_mode === "M1_LTF" || rTel?.m1_active || rCho.includes("M1"));
+                              const maxS = rM1 ? 6 : 7;
+                              return `${Math.min(maxS, Math.round((Number(a.winRate || 0) / 100) * maxS))} / ${maxS} Steps`;
+                            })()}
                           </TableCell>
                           <TableCell className="font-mono text-xs text-right text-sky-400 font-bold">
                             {Number(a.zScore || 0) > 0 ? `${Number(a.zScore).toFixed(2)}R` : "-"}

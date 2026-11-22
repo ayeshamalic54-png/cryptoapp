@@ -14,7 +14,7 @@ export default function Signals() {
   return (
     <div className="flex flex-col h-full overflow-auto bg-background p-4 sm:p-6 space-y-6">
       <div>
-        <h2 className="text-2xl font-bold tracking-tight text-foreground">9-Step SMC Signal History</h2>
+        <h2 className="text-2xl font-bold tracking-tight text-foreground">Pure SMC Signal History</h2>
         <p className="text-sm text-muted-foreground">Verified Binance Futures institutional signals (M15 Bias · Sweep · CHoCH · FVG · Opposing Liquidity Target)</p>
       </div>
 
@@ -27,7 +27,7 @@ export default function Signals() {
             </div>
           ) : !signals || signals.length === 0 ? (
             <div className="text-sm text-muted-foreground py-12 text-center font-mono">
-              Clean post-SMC slate active — awaiting next 9/9 verified Futures signal.
+              Clean post-SMC slate active — awaiting next verified Futures signal.
             </div>
           ) : (
             <Table>

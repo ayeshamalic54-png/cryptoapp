@@ -95,7 +95,7 @@ export async function sendDiscordCryptoSignalAlert(input: CryptoSignalAlertInput
     {
       title,
       description:
-        `**Strategy:** \`Pure 9-Condition Institutional SMC (M15 Bias + M5 Sweep + CHoCH + FVG + Closed Retest & Rejection) 🟢\`\n` +
+        `**Strategy:** \`Pure Institutional SMC (M15 Bias + M5 Sweep + M1/M5 CHoCH + FVG + Closed Retest & Rejection) 🟢\`\n` +
         `**Time (PKT):** \`${nowStr}\``,
       color: isLong ? 0x10b981 : 0xef4444,
       fields: [
@@ -126,7 +126,7 @@ export async function sendDiscordCryptoSignalAlert(input: CryptoSignalAlertInput
         },
       ],
       footer: {
-        text: "Crypto Futures Quant Terminal · Direct Cloud 9-Step SMC Engine · Binance USDT-M",
+        text: "Crypto Futures Quant Terminal · Direct Cloud M1/M5 SMC Engine · Binance USDT-M",
       },
     },
   ];

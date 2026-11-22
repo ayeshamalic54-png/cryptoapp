@@ -49,7 +49,7 @@ const BLUE_GUARDIAN_CRYPTO_RULES = [
   { rule: "Minimum Hold Duration", value: ">= 120 Seconds (2-Min Proscribed HFT Rule)", botValue: "Bot Enforces 140s Min Hold on Discretionary Exits", safe: true },
   { rule: "Capital Margin Cap", value: "Prop Firm <= 80% / Personal Full Capital", botValue: "Prop <= 80% Cap | Personal up to 100%", safe: true },
   { rule: "Weekend Crypto Holding", value: "Allowed 24/7 on Crypto Perpetuals", botValue: "Supported 24/7 (Optional PKT Session Guard)", safe: true },
-  { rule: "EA / Automated Bot", value: "Pure Non-Martingale / Non-Grid Single Order", botValue: "Pure 9-Step SMC Single Order + One-Time BE", safe: true },
+  { rule: "EA / Automated Bot", value: "Pure Non-Martingale / Non-Grid Single Order", botValue: "Pure M1/M5 SMC Single Order + One-Time BE", safe: true },
 ];
 
 export default function Config() {
@@ -240,7 +240,7 @@ export default function Config() {
       <div>
         <h2 className="text-2xl font-bold tracking-tight">Crypto Futures Configuration</h2>
         <p className="text-sm text-muted-foreground">
-          Pure 9-Condition SMC · Dual Mode (Prop Firm ≤ 80% Cap vs Personal up to 100% Full Capital) · Low-Fee Maker TP (0.02%)
+          Pure M15+M5+M1 LTF SMC · Dual Mode (Prop Firm ≤ 80% Cap vs Personal up to 100% Full Capital) · Low-Fee Maker TP (0.02%)
         </p>
       </div>
 
@@ -450,7 +450,7 @@ export default function Config() {
                                 {field.value ? <Zap className="w-3.5 h-3.5 text-emerald-400" /> : <ZapOff className="w-3.5 h-3.5 text-amber-400" />}
                                 Auto Execute (Pure SMC)
                               </FormLabel>
-                              <FormDescription className="text-[11px]">Scans Top 10 coins &amp; auto-executes on 9/9 steps</FormDescription>
+                              <FormDescription className="text-[11px]">Scans Top 10 coins &amp; auto-executes on verified SMC setup</FormDescription>
                             </div>
                             <FormControl>
                               <Switch
@@ -607,7 +607,7 @@ export default function Config() {
             <div className="text-indigo-400 font-bold">Sample Signal Pattern Preview:</div>
             <div>@everyone 🟢 [BTCUSDT] MARKET LONG (BUY) · 5x ISOLATED USDT-M</div>
             <div>📌 Entry: Market Price | 🛑 SL (-0.80%) | 🎯 TP (+2.40% · 1:3.0 RRR)</div>
-            <div>⚙️ Pure 9-Step SMC + M15 Structure + One-Time Fee-Safe Breakeven + Close PnL Card (PKT)</div>
+            <div>⚙️ Pure M1/M5 SMC + M15 Structure + One-Time Fee-Safe Breakeven + Close PnL Card (PKT)</div>
           </div>
           <Button
             type="button"

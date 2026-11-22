@@ -117,7 +117,7 @@ export default function Backtest() {
       const data = (await res.json()) as CryptoBacktestResponse;
       setResults(data);
       toast({
-        title: `9-Step SMC Simulation Complete`,
+        title: `SMC Simulation Complete`,
         description: `${data.symbol}: ${data.totalTrades} trades | Win Rate ${data.winRate}% | Net ${formatUsdt(data.netProfit, true)}`,
       });
     } catch (err: any) {
@@ -131,7 +131,7 @@ export default function Backtest() {
     <div className="flex flex-col h-full overflow-auto bg-background p-4 sm:p-6 space-y-6">
       <div>
         <h2 className="text-2xl font-bold tracking-tight text-foreground">
-          Crypto Futures Pure 9-Condition SMC Backtester
+          Crypto Futures Pure Institutional SMC Backtester
         </h2>
         <p className="text-sm text-muted-foreground">
           Zero lookahead M15 + M5 + M1 LTF Binance Futures simulation · Test Top 10 coins OR search any Binance perpetual
@@ -221,7 +221,7 @@ export default function Backtest() {
             </div>
             <Button onClick={handleRunBacktest} disabled={loading || isReadOnly} className="bg-indigo-600 hover:bg-indigo-500 font-mono text-xs font-bold gap-2">
               <Play className="w-3.5 h-3.5 fill-current" />
-              {loading ? `SIMULATING ${symbol}...` : `RUN 9-STEP SMC BACKTEST (${symbol})`}
+              {loading ? `SIMULATING ${symbol}...` : `RUN SMC BACKTEST (${symbol})`}
             </Button>
           </div>
         </CardContent>
