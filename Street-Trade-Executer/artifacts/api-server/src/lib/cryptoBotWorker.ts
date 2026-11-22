@@ -251,10 +251,11 @@ export async function syncLeverageAcrossCoins(targetLev: number, extraSymbol?: s
 const STABLECOIN_ASSETS = new Set(["USDT", "USDC", "FDUSD", "BUSD", "TUSD", "USDP"]);
 
 /**
- * Computes Futures walletBalance, equity, and available balance from USD-pegged stablecoins
- * (USDT + USDC + FDUSD + BUSD + TUSD + USDP) plus live unrealized P&L.
- * Excludes volatile non-stablecoin spot/collateral holdings (e.g. 0.01 BTC on Testnet) so
- * reported equity never drifts up/down with coin prices when zero trades are running.
+ * Computes Futures walletBalance, equity, and available balance 1-to-1 with Binance Futures UI.
+ * Uses top-level Binance `/fapi/v2/account` totals (`totalWalletBalance`, `totalMarginBalance`,
+ * `availableBalance`) so Multi-Asset margin collateral (e.g. BTC + USDT + USDC on Testnet) and
+ * live unrealized P&L match the Binance account screen cent-for-cent, falling back to stablecoin
+ * sum only when top-level totals are unavailable.
  */
 export function extractAccountSnapshotBalances(accData: any): { walletBalance: number; equity: number; avail: number } {
   const assets = Array.isArray(accData?.assets) ? accData.assets : [];
@@ -270,23 +271,25 @@ export function extractAccountSnapshotBalances(accData: any): { walletBalance: n
   const usdtAsset = stableAssets.find((a: any) => String(a?.asset || "").toUpperCase() === "USDT");
   const usdtAvail = Number(usdtAsset?.availableBalance ?? 0);
 
-  if (stableAssets.length > 0 && stableWalletSum > 0) {
-    const eq = stableWalletSum + unreal;
-    const rawAvail = topAvail > 0 ? topAvail : usdtAvail > 0 ? usdtAvail : eq;
-    const avail = Math.min(rawAvail, Math.max(0, eq));
+  if (rawMarginBal > 0 || rawWallet > 0) {
+    const walletBal = rawWallet > 0 ? rawWallet : Math.max(0, rawMarginBal - unreal);
+    const marginBal = rawMarginBal > 0 ? rawMarginBal : walletBal + unreal;
+    const rawAvail = topAvail > 0 ? topAvail : usdtAvail > 0 ? usdtAvail : marginBal;
+    const avail = Math.min(rawAvail, Math.max(0, marginBal));
     return {
-      walletBalance: Number(stableWalletSum.toFixed(2)),
-      equity: Number(eq.toFixed(2)),
+      walletBalance: Number(walletBal.toFixed(2)),
+      equity: Number(marginBal.toFixed(2)),
       avail: Number(avail.toFixed(2)),
     };
   }
 
-  const marginBal = rawMarginBal > 0 ? rawMarginBal : rawWallet + unreal;
-  const avail = topAvail > 0 ? topAvail : usdtAvail > 0 ? usdtAvail : rawWallet;
+  const fallbackWallet = stableWalletSum > 0 ? stableWalletSum : 0;
+  const fallbackEq = fallbackWallet + unreal;
+  const fallbackAvail = topAvail > 0 ? topAvail : usdtAvail > 0 ? usdtAvail : fallbackEq;
   return {
-    walletBalance: Number(rawWallet.toFixed(2)),
-    equity: Number(marginBal.toFixed(2)),
-    avail: Number(avail.toFixed(2)),
+    walletBalance: Number(fallbackWallet.toFixed(2)),
+    equity: Number(fallbackEq.toFixed(2)),
+    avail: Number(Math.max(0, fallbackAvail).toFixed(2)),
   };
 }
 
@@ -966,7 +969,7 @@ async function reconcileRecentClosedDiscrepancies(preloadedSnap?: {
                   updated_at=NOW()
               WHERE trading_date=${todayStr} AND COALESCE(mt5_login,0)=0`
         );
-        logger.info({ todayStr, prevStartEq: startEq, stableEquity: snap.equity }, "Aligned today daily_metrics baseline to stablecoin equity (0 trades)");
+        logger.info({ todayStr, prevStartEq: startEq, syncedEquity: snap.equity }, "Aligned today daily_metrics baseline to Binance Futures margin balance (0 trades)");
       } else if (startEq > 0 && recordedMaxDd > 20 && snap.equity / startEq > 0.85) {
         const { dailyDdPct } = computeDrawdownMetrics(snap.equity, initBal, startEq);
         await db.execute(
@@ -998,7 +1001,7 @@ async function reconcileRecentClosedDiscrepancies(preloadedSnap?: {
           await db.execute(
             sql`UPDATE bot_state SET max_equity_peak=${nextPeak.toString()}, updated_at=NOW() WHERE id=${Number(botRow.id)}`
           );
-          logger.info({ prevPeak: recordedPeak, cleanPeak: nextPeak }, "Cleared non-stablecoin collateral inflation from max_equity_peak");
+          logger.info({ prevPeak: recordedPeak, cleanPeak: nextPeak }, "Reconciled max_equity_peak to realized ledger history");
         }
       }
     }
@@ -1751,6 +1754,6 @@ export function startCryptoBotWorker() {
     void runSmcScanCycle();
   }, 1500);
 
-  setInterval(() => void runFastCycle(), 9000);
+  setInterval(() => void runFastCycle(), 15000);
   setInterval(() => void runSmcScanCycle(), 25000);
 }
