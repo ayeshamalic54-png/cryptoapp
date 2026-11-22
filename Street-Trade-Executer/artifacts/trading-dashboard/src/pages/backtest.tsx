@@ -28,6 +28,7 @@ interface CryptoTradeSim {
   profitPercent: number;
   breakevenTriggered: boolean;
   sessionLabel: string;
+  entryTf?: "M5" | "M1";
   reason: string;
   entryTime: string;
   exitTime: string;
@@ -38,6 +39,9 @@ interface CryptoBacktestResponse {
   accountMode: string;
   leverage: number;
   maxMarginPct: number;
+  executionMode?: string;
+  m1TradesCount?: number;
+  m5TradesCount?: number;
   totalTrades: number;
   wins: number;
   losses: number;
@@ -130,7 +134,7 @@ export default function Backtest() {
           Crypto Futures Pure 9-Condition SMC Backtester
         </h2>
         <p className="text-sm text-muted-foreground">
-          Zero lookahead M15 + M5 Binance Futures simulation · Test Top 10 coins OR search any Binance perpetual
+          Zero lookahead M15 + M5 + M1 LTF Binance Futures simulation · Test Top 10 coins OR search any Binance perpetual
         </p>
       </div>
 
@@ -141,7 +145,7 @@ export default function Backtest() {
             Strategy &amp; Capital Configuration
           </CardTitle>
           <CardDescription className="text-xs">
-            S1 M15 Bias → S2 M5 Sweep → S3 CHoCH → S4 Displacement FVG → S5 Closed Retest → S6 Rejection → S7 Close → S8 Sweep SL → S9 Unbroken M15 Target (1.35R–3.5R)
+            S1 M15 Bias → S2 M5 Sweep → S3 M5/M1 CHoCH → S4 Displacement FVG → S5 Closed Retest → S6 Rejection → S7 M15 Equilibrium → S8 Sweep SL → S9 Opposing M15 Liquidity TP
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
@@ -266,8 +270,10 @@ export default function Backtest() {
             <Card className="bg-card border-border border-t-2 border-t-cyan-500">
               <CardHeader className="pb-1"><CardTitle className="text-[10px] text-muted-foreground uppercase font-mono">Config Mode</CardTitle></CardHeader>
               <CardContent>
-                <div className="text-sm font-mono font-bold text-cyan-400">{results.accountMode}</div>
-                <div className="text-[10px] text-muted-foreground font-mono">{results.leverage}x · Start ${results.initialBalance}</div>
+                <div className="text-sm font-mono font-bold text-cyan-400">{results.accountMode} · {results.executionMode || "M15 + M5"}</div>
+                <div className="text-[10px] text-muted-foreground font-mono">
+                  {results.leverage}x · {results.m1TradesCount ?? 0} M1 / {results.m5TradesCount ?? 0} M5 · Start ${results.initialBalance}
+                </div>
               </CardContent>
             </Card>
           </div>

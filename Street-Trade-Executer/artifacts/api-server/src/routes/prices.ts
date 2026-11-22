@@ -53,10 +53,7 @@ export async function fetchLivePriceMap(): Promise<Record<string, number>> {
   if (inFlightPriceMap) return inFlightPriceMap;
 
   inFlightPriceMap = (async () => {
-    const isTestnet = ["true", "1", "yes"].includes((process.env.USE_BINANCE_TESTNET || "").trim().toLowerCase());
-    const futEndpoints = isTestnet
-      ? ["https://testnet.binancefuture.com/fapi/v1/ticker/price", "https://fapi.binance.com/fapi/v1/ticker/price"]
-      : ["https://fapi.binance.com/fapi/v1/ticker/price", "https://testnet.binancefuture.com/fapi/v1/ticker/price"];
+    const futEndpoints = ["https://fapi.binance.com/fapi/v1/ticker/price", "https://testnet.binancefuture.com/fapi/v1/ticker/price"];
 
     const nextMap: Record<string, number> = {};
     for (const url of futEndpoints) {
@@ -105,10 +102,8 @@ async function fetchBinanceFuturesPrices(): Promise<PriceRow[]> {
   if (inFlightFuturesPrices) return inFlightFuturesPrices;
 
   inFlightFuturesPrices = (async () => {
-    const isTestnet = ["true", "1", "yes"].includes((process.env.USE_BINANCE_TESTNET || "").trim().toLowerCase());
-    const endpoints = isTestnet
-      ? ["https://testnet.binancefuture.com/fapi/v1/ticker/24hr", "https://fapi.binance.com/fapi/v1/ticker/24hr"]
-      : ["https://fapi.binance.com/fapi/v1/ticker/24hr"];
+    // Use public Mainnet Futures for 24h market stats (weight=40) to preserve Testnet signed-IP quota
+    const endpoints = ["https://fapi.binance.com/fapi/v1/ticker/24hr", "https://testnet.binancefuture.com/fapi/v1/ticker/24hr"];
 
     const nowStr = new Date().toISOString();
     const topRank = new Map(TOP_10_CRYPTO_COINS.map((sym, idx) => [sym, idx]));
@@ -138,7 +133,7 @@ async function fetchBinanceFuturesPrices(): Promise<PriceRow[]> {
             changePct24h: parseFloat(item.priceChangePercent) || 0,
             quoteVolume: parseFloat(item.quoteVolume || "0") || 0,
             category: "crypto",
-            source: isTestnet && url.includes("testnet") ? "Binance Testnet" : "Binance Futures",
+            source: url.includes("testnet") ? "Binance Testnet" : "Binance Futures",
             updatedAt: nowStr,
           });
         }

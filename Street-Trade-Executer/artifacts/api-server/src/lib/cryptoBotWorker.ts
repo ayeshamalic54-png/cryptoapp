@@ -41,6 +41,11 @@ const peakFloatingMap = new Map<number, number>();
 const closeConfirmCount = new Map<string, number>();
 const tradeCooldown = new Map<string, number>();
 const signalCooldown = new Map<string, number>();
+const usedSweepKeys = new Map<string, number>();
+
+export function triggerFastCycleNow() {
+  void runFastCycle();
+}
 
 let timeOffsetMs = 0;
 let timeSynced = false;
@@ -155,16 +160,20 @@ async function signedBinanceRequest(
   }
 }
 
-async function getSymbolFilters(symbol: string): Promise<SymbolFilter> {
+export async function getSymbolFilters(symbol: string): Promise<SymbolFilter> {
   const sym = await resolveLiveBinanceSymbol(symbol);
   const cached = filterCache.get(sym);
   if (cached && Date.now() - cached.ts < 600_000) return cached.filter;
 
-  try {
-    const r = await fetch(`${getBaseUrl()}/fapi/v1/exchangeInfo`, { signal: AbortSignal.timeout(8000) });
-    if (r.ok) {
+  for (const base of [...new Set(["https://fapi.binance.com", getBaseUrl()])]) {
+    if (getHostCooldownState(base).coolingDown) continue;
+    try {
+      const r = await fetch(`${base}/fapi/v1/exchangeInfo`, { signal: AbortSignal.timeout(8000) });
+      recordBinanceResponse(base, r.status, r.headers.get("retry-after"), r.headers.get("x-mbx-used-weight-1m"));
+      if (!r.ok) continue;
       const json = (await r.json()) as { symbols?: any[] };
-      for (const s of json.symbols || []) {
+      if (!Array.isArray(json.symbols) || json.symbols.length === 0) continue;
+      for (const s of json.symbols) {
         const fmap: Record<string, any> = {};
         for (const f of s.filters || []) fmap[f.filterType] = f;
         const entry: SymbolFilter = {
@@ -176,8 +185,9 @@ async function getSymbolFilters(symbol: string): Promise<SymbolFilter> {
         };
         filterCache.set(s.symbol, { ts: Date.now(), filter: entry });
       }
-    }
-  } catch {}
+      if (filterCache.get(sym)) break;
+    } catch {}
+  }
 
   return (
     filterCache.get(sym)?.filter || {
@@ -381,7 +391,7 @@ async function getAccountSnapshot(): Promise<{
   };
 }
 
-function calculateFuturesQty(
+export function calculateFuturesQty(
   filter: SymbolFilter,
   entryPrice: number,
   slPrice: number,
@@ -564,6 +574,29 @@ async function executeSingleFuturesOrder(
   const rQty = quantizeStep(qty, filter.stepSize, false);
   if (rQty <= 0 || rQty < filter.minQty) return { ok: false, error: `Qty ${rQty} < minQty ${filter.minQty}` };
 
+  if (isTestnet() && entryPrice > 0) {
+    try {
+      const btResp = await fetch(`${getBaseUrl()}/fapi/v1/ticker/bookTicker?symbol=${encodeURIComponent(binSym)}`, {
+        signal: AbortSignal.timeout(3500),
+      });
+      recordBinanceResponse(
+        getBaseUrl(),
+        btResp.status,
+        btResp.headers.get("retry-after"),
+        btResp.headers.get("x-mbx-used-weight-1m")
+      );
+      if (btResp.ok) {
+        const bt = (await btResp.json()) as { bidPrice?: string; askPrice?: string };
+        const bid = Number(bt.bidPrice || 0);
+        const ask = Number(bt.askPrice || 0);
+        const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid || ask;
+        if (mid > 0 && Math.abs(mid - entryPrice) / entryPrice >= 0.025) {
+          return { ok: false, error: `Testnet book diverged (${mid} vs ${entryPrice})` };
+        }
+      }
+    } catch {}
+  }
+
   const actualLev = await ensureLeverage(binSym, leverage, true);
   logger.info({ symbol: binSym, requestedLev: leverage, actualLev }, "Binance leverage verified before entry");
   const orderRes = await signedBinanceRequest("POST", "/fapi/v1/order", {
@@ -579,8 +612,15 @@ async function executeSingleFuturesOrder(
   const fillPrice = Number(orderRes.data?.avgPrice || 0) || entryPrice;
   const execQty = Number(orderRes.data?.executedQty || rQty) || rQty;
 
-  let slRound = quantizeTick(slPrice, filter.tickSize);
-  let tpRound = quantizeTick(tpPrice, filter.tickSize);
+  const priceDelta =
+    isTestnet() &&
+    entryPrice > 0 &&
+    Math.abs(fillPrice - entryPrice) / entryPrice > 0.0005 &&
+    Math.abs(fillPrice - entryPrice) / entryPrice < 0.025
+      ? fillPrice - entryPrice
+      : 0;
+  let slRound = quantizeTick(slPrice + priceDelta, filter.tickSize);
+  let tpRound = quantizeTick(tpPrice + priceDelta, filter.tickSize);
   if (side === "BUY") {
     if (slRound >= fillPrice) slRound = quantizeTick(fillPrice * 0.992, filter.tickSize);
     if (tpRound <= fillPrice) tpRound = quantizeTick(fillPrice * 1.015, filter.tickSize);
@@ -1081,7 +1121,10 @@ async function runFastCycle() {
     // Reconcile closed / open DB positions with live Binance ONLY when account endpoints returned HTTP 200
     if (credsPresent && binanceStatusCode === 200) {
       const cfgLev = Math.max(1, Math.min(50, Math.round(Number(botRow.leverage || 5))));
-      if (lastSyncedConfigLev !== cfgLev) {
+      if (lastSyncedConfigLev === 0) {
+        // Avoid 10 simultaneous POST /leverage requests on cold boot; per-coin leverage is synced before execution
+        lastSyncedConfigLev = cfgLev;
+      } else if (lastSyncedConfigLev !== cfgLev) {
         void syncLeverageAcrossCoins(cfgLev, String(botRow.active_pair || ""));
       }
 
@@ -1350,14 +1393,15 @@ async function runFastCycle() {
 }
 
 /**
- * Evaluates a single coin on closed M5/M15 klines and persists live SMC telemetry, zones & scanner state.
- * Shared across background scan loop and instant Favorite additions.
+ * Evaluates a single coin on closed M15/M5 klines plus M1 LTF refinement (when S1+S2 pass or pinned active)
+ * and persists live SMC telemetry, zones & scanner state. Shared across background scan loop and Favorite pinning.
  */
 export async function evaluateAndPersistSymbolSmc(
   rawSym: string,
   maxSlPct: number,
   leverage: number,
-  openTradeMap?: Map<string, { side: string; isSmc: boolean }>
+  openTradeMap?: Map<string, { side: string; isSmc: boolean }>,
+  activeSym?: string
 ): Promise<{ sym: string; evalRes: ReturnType<typeof analyzeLiveSmcTelemetry> } | null> {
   const sym = await resolveLiveBinanceSymbol(rawSym);
   const [m5, m15] = await Promise.all([
@@ -1366,7 +1410,17 @@ export async function evaluateAndPersistSymbolSmc(
   ]);
   if (m5.length < 25 || m15.length < 15) return null;
 
-  const evalRes = analyzeLiveSmcTelemetry(sym, m5, m15, maxSlPct, leverage, 1.35);
+  let evalRes = analyzeLiveSmcTelemetry(sym, m5, m15, maxSlPct, leverage, 1.35);
+  const preBias = String(evalRes.telemetry.m15_bias || "");
+  const hasM15Bias = preBias.includes("BULLISH") || preBias.includes("BEARISH");
+  const hasM5Sweep = String(evalRes.telemetry.sweep_status || "").includes("PASS");
+  const isPinnedActive = Boolean(activeSym && sym.toUpperCase() === activeSym.toUpperCase());
+  if (isPinnedActive || (hasM15Bias && hasM5Sweep)) {
+    const m1 = await fetchBinanceKlines(sym, "1m", 120);
+    if (m1.length >= 25) {
+      evalRes = analyzeLiveSmcTelemetry(sym, m5, m15, maxSlPct, leverage, 1.35, m1);
+    }
+  }
   const t = evalRes.telemetry as any;
   const openInfo = openTradeMap?.get(sym.toUpperCase());
 
@@ -1509,8 +1563,12 @@ async function runSmcScanCycle() {
       });
     }
 
-    let bestCandidate: { sym: string; evalRes: ReturnType<typeof analyzeLiveSmcTelemetry> } | null = null;
-    let bestScore = -1;
+    const candidates: Array<{
+      sym: string;
+      evalRes: ReturnType<typeof analyzeLiveSmcTelemetry>;
+      sc: number;
+      sweepKey: string;
+    }> = [];
 
     const hostCd = getHostCooldownState(getBaseUrl());
     if (hostCd.softThrottled && !hostCd.coolingDown) {
@@ -1520,9 +1578,9 @@ async function runSmcScanCycle() {
 
     for (let i = 0; i < scanList.length; i++) {
       const sym = scanList[i]!;
-      const evaluated = await evaluateAndPersistSymbolSmc(sym, maxSlPct, leverage, openTradeMap);
+      const evaluated = await evaluateAndPersistSymbolSmc(sym, maxSlPct, leverage, openTradeMap, activeSym);
       if (i < scanList.length - 1) {
-        await new Promise((r) => setTimeout(r, 120));
+        await new Promise((r) => setTimeout(r, 100));
       }
       if (!evaluated) continue;
       const { evalRes } = evaluated;
@@ -1531,42 +1589,50 @@ async function runSmcScanCycle() {
       if (t.action === "BUY" || t.action === "SELL") {
         const tradable = await isSymbolTradableOnVenue(evaluated.sym);
         if (!tradable) continue;
-        const sc = (evalRes.rrr || 1.35) + (evaluated.sym === activeSym ? 2.0 : favList.includes(evaluated.sym) ? 1.0 : 0);
-        if (sc > bestScore) {
-          bestScore = sc;
-          bestCandidate = { sym: evaluated.sym, evalRes };
-        }
+        const m1Boost = evalRes.executionMode === "M1_LTF" ? 0.25 : 0;
+        const sc = (evalRes.rrr || 1.35) + m1Boost + (evaluated.sym === activeSym ? 2.0 : favList.includes(evaluated.sym) ? 1.0 : 0);
+        candidates.push({
+          sym: evaluated.sym,
+          evalRes,
+          sc,
+          sweepKey: String(evalRes.sweepKey || ""),
+        });
       }
     }
 
-    if (!bestCandidate) return;
+    if (candidates.length === 0) return;
+    candidates.sort((a, b) => b.sc - a.sc);
 
-    const { sym, evalRes } = bestCandidate;
-    const action = (evalRes.telemetry as any).action as "BUY" | "SELL";
+    const nowMs = Date.now();
+    for (const [k, ts] of usedSweepKeys.entries()) {
+      if (nowMs - ts > 4 * 3600_000) usedSweepKeys.delete(k);
+    }
+
     const equity = Number(botRow.equity ?? 0) || Number(botRow.initial_balance ?? 10000);
-    const filter = await getSymbolFilters(sym);
-    const sized = calculateFuturesQty(
-      filter,
-      evalRes.livePrice,
-      evalRes.slPrice,
-      equity,
-      riskPct,
-      leverage,
-      maxMarginPct,
-      accountMode
-    );
-
     if (!autoExec) {
-      const lastAlert = signalCooldown.get(sym) || 0;
+      const top = candidates[0]!;
+      const topAction = (top.evalRes.telemetry as any).action as "BUY" | "SELL";
+      const filter = await getSymbolFilters(top.sym);
+      const sized = calculateFuturesQty(
+        filter,
+        top.evalRes.livePrice,
+        top.evalRes.slPrice,
+        equity,
+        riskPct,
+        leverage,
+        maxMarginPct,
+        accountMode
+      );
+      const lastAlert = signalCooldown.get(top.sym) || 0;
       if (Date.now() - lastAlert >= 300_000) {
-        signalCooldown.set(sym, Date.now());
+        signalCooldown.set(top.sym, Date.now());
         await sendDiscordCryptoSignalAlert({
-          action,
-          symbol: sym,
-          entryPrice: evalRes.livePrice,
-          slPrice: evalRes.slPrice,
-          tpPrice: evalRes.tpPrice,
-          rrr: evalRes.rrr,
+          action: topAction,
+          symbol: top.sym,
+          entryPrice: top.evalRes.livePrice,
+          slPrice: top.evalRes.slPrice,
+          tpPrice: top.evalRes.tpPrice,
+          rrr: top.evalRes.rrr,
           qty: sized.qty,
           leverage,
           accountMode,
@@ -1585,54 +1651,78 @@ async function runSmcScanCycle() {
       return;
     }
 
-    const lastCd = tradeCooldown.get(sym) || 0;
-    if (Date.now() - lastCd < 180_000) return;
-    if (sized.qty <= 0) {
-      logger.info({ sym, err: sized.error }, "SMC sizing skipped");
-      return;
-    }
-
     // Strict Single-Trade Lock verified directly on Binance
     const snap = await getAccountSnapshot();
     if (snap.statusCode !== 200 || snap.positions.length >= 1) return;
 
-    const sigIns = await db.execute(
-      sql`INSERT INTO signals (symbol_a, symbol_b, price_a, price_b, beta, alpha, z_score, obi, action)
-          VALUES (${sym}, ${`${evalRes.rrr.toFixed(2)}R`}, ${evalRes.livePrice.toString()}, ${evalRes.tpPrice.toString()}, ${evalRes.slPrice.toString()}, ${leverage.toString()}, ${evalRes.rrr.toString()}, ${sized.marginPct.toString()}, ${action})
-          RETURNING id`
-    );
-    const sigId = Number(((sigIns.rows || [])[0] as any)?.id || 0) || undefined;
+    for (const cand of candidates) {
+      const { sym, evalRes, sweepKey } = cand;
+      const action = (evalRes.telemetry as any).action as "BUY" | "SELL";
+      const sweepToken = sweepKey ? `${sym}|${sweepKey}` : "";
+      if (sweepToken && usedSweepKeys.has(sweepToken)) continue;
 
-    const exec = await executeSingleFuturesOrder(
-      sym,
-      action,
-      sized.qty,
-      evalRes.livePrice,
-      evalRes.slPrice,
-      evalRes.tpPrice,
-      leverage,
-      `SMC_9STEP_${accountMode}`,
-      sigId
-    );
-    if (exec.ok) {
-      tradeCooldown.set(sym, Date.now());
-      await sendDiscordCryptoSignalAlert({
-        action,
-        symbol: sym,
-        entryPrice: exec.fillPrice || evalRes.livePrice,
-        slPrice: exec.sl || evalRes.slPrice,
-        tpPrice: exec.tp || evalRes.tpPrice,
-        rrr: evalRes.rrr,
-        qty: sized.qty,
+      const lastCd = tradeCooldown.get(sym) || 0;
+      if (Date.now() - lastCd < 180_000) continue;
+
+      const filter = await getSymbolFilters(sym);
+      const sized = calculateFuturesQty(
+        filter,
+        evalRes.livePrice,
+        evalRes.slPrice,
+        equity,
+        riskPct,
         leverage,
-        accountMode,
-        riskUsdt: sized.riskUsdt,
-        marginPct: sized.marginPct,
         maxMarginPct,
-        ticketId: exec.orderId,
-        isSignalOnly: false,
-      });
-      logger.info({ sym, action, qty: sized.qty, entry: exec.fillPrice }, "Cloud Crypto SMC order executed");
+        accountMode
+      );
+      if (sized.qty <= 0) {
+        logger.info({ sym, err: sized.error }, "SMC sizing skipped");
+        continue;
+      }
+
+      const sigIns = await db.execute(
+        sql`INSERT INTO signals (symbol_a, symbol_b, price_a, price_b, beta, alpha, z_score, obi, action)
+            VALUES (${sym}, ${`${evalRes.rrr.toFixed(2)}R`}, ${evalRes.livePrice.toString()}, ${evalRes.tpPrice.toString()}, ${evalRes.slPrice.toString()}, ${leverage.toString()}, ${evalRes.rrr.toString()}, ${sized.marginPct.toString()}, ${action})
+            RETURNING id`
+      );
+      const sigId = Number(((sigIns.rows || [])[0] as any)?.id || 0) || undefined;
+
+      const modeTag = evalRes.executionMode === "M1_LTF" ? "M1" : "M5";
+      const exec = await executeSingleFuturesOrder(
+        sym,
+        action,
+        sized.qty,
+        evalRes.livePrice,
+        evalRes.slPrice,
+        evalRes.tpPrice,
+        leverage,
+        `SMC_9STEP_${modeTag}_${accountMode}`,
+        sigId
+      );
+      if (exec.ok) {
+        tradeCooldown.set(sym, Date.now());
+        if (sweepToken) usedSweepKeys.set(sweepToken, Date.now());
+        await sendDiscordCryptoSignalAlert({
+          action,
+          symbol: sym,
+          entryPrice: exec.fillPrice || evalRes.livePrice,
+          slPrice: exec.sl || evalRes.slPrice,
+          tpPrice: exec.tp || evalRes.tpPrice,
+          rrr: evalRes.rrr,
+          qty: sized.qty,
+          leverage,
+          accountMode,
+          riskUsdt: sized.riskUsdt,
+          marginPct: sized.marginPct,
+          maxMarginPct,
+          ticketId: exec.orderId,
+          isSignalOnly: false,
+        });
+        logger.info({ sym, action, modeTag, qty: sized.qty, entry: exec.fillPrice }, "Cloud Crypto SMC order executed");
+        break;
+      } else {
+        logger.warn({ sym, action, err: exec.error }, "Cloud Crypto SMC execution rejected; checking next candidate");
+      }
     }
   } catch (err) {
     logger.warn({ err }, "cryptoBotWorker scan cycle error");

@@ -122,6 +122,7 @@ export function SmcChartOverlay({
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState<number>(1000);
   const [activeTab, setActiveTab] = useState<"smc" | "tv">("smc");
+  const [chartTf, setChartTf] = useState<"M5" | "M1">("M5");
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
   const [zoomLevel, setZoomLevel] = useState<number>(1.0);
@@ -309,26 +310,37 @@ export function SmcChartOverlay({
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
 
-  // Extract Live Binance M5 Candlesticks from Telemetry
+  const parsedBounds = useMemo<Record<string, any> | null>(() => {
+    try {
+      const rawJson = telemetry?.fvg_bounds_json ?? telemetry?.fvgBoundsJson;
+      if (!rawJson) return null;
+      const parsed = typeof rawJson === "string" ? JSON.parse(rawJson) : rawJson;
+      return typeof parsed === "object" && parsed !== null ? parsed : null;
+    } catch {
+      return null;
+    }
+  }, [telemetry]);
+
+  const hasM1Candles = Array.isArray(parsedBounds?.candles_m1) && parsedBounds.candles_m1.length >= 8;
+  const isM1Active = Boolean(parsedBounds?.execution_mode === "M1_LTF" || parsedBounds?.m1_active);
+  const wantM1 = chartTf === "M1" && hasM1Candles;
+
+  // Extract Live Binance M5 / M1 LTF Candlesticks from Telemetry
   const realCandles = useMemo<Candle[] | null>(() => {
     try {
       let rawList: any[] | null = null;
-      if (Array.isArray(telemetry?.candles) && telemetry.candles.length >= 8) {
+      if (wantM1) {
+        rawList = parsedBounds?.candles_m1 ?? null;
+      } else if (Array.isArray(telemetry?.candles) && telemetry.candles.length >= 8) {
         rawList = telemetry.candles;
-      } else {
-        const rawJson = telemetry?.fvg_bounds_json ?? telemetry?.fvgBoundsJson;
-        if (rawJson) {
-          const parsed = typeof rawJson === "string" ? JSON.parse(rawJson) : rawJson;
-          if (Array.isArray(parsed?.candles) && parsed.candles.length >= 8) {
-            rawList = parsed.candles;
-          }
-        }
+      } else if (Array.isArray(parsedBounds?.candles) && parsedBounds.candles.length >= 8) {
+        rawList = parsedBounds.candles;
       }
       if (!rawList || rawList.length < 8) return null;
 
       const maxCount = isMobile
-        ? Math.max(12, Math.min(36, Math.round(18 / zoomLevel)))
-        : Math.max(16, Math.min(50, Math.round(34 / zoomLevel)));
+        ? Math.max(12, Math.min(wantM1 ? 45 : 36, Math.round((wantM1 ? 24 : 18) / zoomLevel)))
+        : Math.max(16, Math.min(wantM1 ? 60 : 50, Math.round((wantM1 ? 44 : 34) / zoomLevel)));
       const sliced = rawList.slice(-maxCount);
 
       const mapped: Candle[] = sliced.map((c, i) => {
@@ -365,7 +377,7 @@ export function SmcChartOverlay({
         });
         if (bestIdx >= 0 && bestDiff < matchTol) mapped[bestIdx]!.isSweep = true;
       }
-      if (s3Pass && chochPrice > 0 && !mapped.some((c) => c.isChoch)) {
+      if (s3Pass && chochPrice > 0 && ((wantM1 && isM1Active) || (!wantM1 && !isM1Active)) && !mapped.some((c) => c.isChoch)) {
         let bestIdx = -1;
         let bestDiff = Infinity;
         mapped.forEach((c, idx) => {
@@ -382,7 +394,7 @@ export function SmcChartOverlay({
     } catch {
       return null;
     }
-  }, [telemetry, livePrice, zoomLevel, isMobile, s2Pass, s3Pass, sweepPrice, chochPrice, isBullishSetup, scaleRef]);
+  }, [telemetry, parsedBounds, wantM1, isM1Active, livePrice, zoomLevel, isMobile, s2Pass, s3Pass, sweepPrice, chochPrice, isBullishSetup, scaleRef]);
 
   // Strictly real Binance Futures M5 candlesticks ONLY (never synthetic/fake fallback bars)
   const candles = useMemo<Candle[]>(() => {
@@ -462,28 +474,24 @@ export function SmcChartOverlay({
   }, [activeZones, symbol, livePrice, maxZoneDist, dupTol]);
 
   const fvgBounds = useMemo(() => {
-    try {
-      const rawJson = telemetry?.fvg_bounds_json ?? telemetry?.fvgBoundsJson;
-      if (rawJson) {
-        const parsed = typeof rawJson === "string" ? JSON.parse(rawJson) : rawJson;
-        if (typeof parsed === "object" && parsed !== null) {
-          const list = isBullishSetup ? parsed.bullish_fvg || [] : parsed.bearish_fvg || [];
-          for (const item of [...list].reverse()) {
-            if (Array.isArray(item) && item.length >= 2) {
-              const l = Number(item[0]);
-              const h = Number(item[1]);
-              if (h > l && Math.abs((l + h) / 2 - livePrice) <= maxZoneDist) {
-                return { low: l, high: h, label: "DISPLACEMENT FVG" };
-              }
-            }
+    if (parsedBounds) {
+      const m1List = isBullishSetup ? parsedBounds.m1_bullish_fvg || [] : parsedBounds.m1_bearish_fvg || [];
+      const m5List = isBullishSetup ? parsedBounds.bullish_fvg || [] : parsedBounds.bearish_fvg || [];
+      const list = wantM1 && m1List.length > 0 ? m1List : m5List;
+      for (const item of [...list].reverse()) {
+        if (Array.isArray(item) && item.length >= 2) {
+          const l = Number(item[0]);
+          const h = Number(item[1]);
+          if (h > l && Math.abs((l + h) / 2 - livePrice) <= maxZoneDist) {
+            return { low: l, high: h, label: wantM1 && m1List.length > 0 ? "M1 DISPLACEMENT FVG" : "DISPLACEMENT FVG" };
           }
         }
       }
-    } catch {}
+    }
     const fvgZ = parsedActiveZones.find((z) => z.type.toUpperCase().includes("FVG") && !z.type.toUpperCase().includes("IFVG"));
     if (fvgZ) return { low: fvgZ.low, high: fvgZ.high, label: fvgZ.label };
     return null;
-  }, [telemetry, parsedActiveZones, livePrice, isBullishSetup, maxZoneDist]);
+  }, [parsedBounds, wantM1, parsedActiveZones, livePrice, isBullishSetup, maxZoneDist]);
 
   const swingStructure = useMemo(() => {
     if (!candles || candles.length < 5) return { swingHigh: 0, swingLow: 0, chochLvl: 0 };
@@ -492,14 +500,9 @@ export function SmcChartOverlay({
     const lowest = Math.min(...completed.map((c) => c.low));
     const swingHigh = sweepPrice > 0 && isBearishSetup ? sweepPrice : highest;
     const swingLow = sweepPrice > 0 && isBullishSetup ? sweepPrice : lowest;
-    const chochLvl =
-      chochPrice > 0
-        ? chochPrice
-        : isBullishSetup
-        ? swingLow + (highest - swingLow) * 0.45
-        : swingHigh - (swingHigh - lowest) * 0.45;
+    const chochLvl = chochPrice > 0 && s3Pass ? chochPrice : 0;
     return { swingHigh, swingLow, chochLvl };
-  }, [candles, sweepPrice, chochPrice, isBullishSetup, isBearishSetup]);
+  }, [candles, sweepPrice, chochPrice, s3Pass, isBullishSetup, isBearishSetup]);
 
   const svgWidth = Math.max(320, containerWidth);
   const svgHeight = isMobile ? 440 : 475;
@@ -997,7 +1000,7 @@ export function SmcChartOverlay({
               Sweep: ${fmtP(sweepPrice)}
             </div>
           )}
-          {chochPrice > 0 && (
+          {s3Pass && chochPrice > 0 && (
             <div className="px-3 py-1 rounded bg-amber-950 border border-amber-500 text-amber-300 font-bold">
               CHoCH: ${fmtP(chochPrice)}
             </div>
@@ -1044,17 +1047,46 @@ export function SmcChartOverlay({
         </div>
 
         {activeTab === "smc" && (
-          <div className="flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 rounded-lg p-1 self-start sm:self-auto">
-            <span className="text-xs font-mono font-bold text-zinc-300 px-2">Zoom: {Math.round(zoomLevel * 100)}%</span>
-            <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setZoomLevel((z) => Math.min(3.5, Number((z + 0.35).toFixed(2))))}>
-              <ZoomIn className="w-4 h-4" />
-            </Button>
-            <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setZoomLevel((z) => Math.max(0.4, Number((z - 0.35).toFixed(2))))}>
-              <ZoomOut className="w-4 h-4" />
-            </Button>
-            <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setZoomLevel(1.0)}>
-              <RotateCcw className="w-3.5 h-3.5" />
-            </Button>
+          <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+            <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-1 gap-1">
+              <Button
+                size="sm"
+                variant={chartTf === "M5" ? "default" : "ghost"}
+                className={cn(
+                  "h-7 px-2.5 text-[11px] font-mono font-bold",
+                  chartTf === "M5" ? "bg-cyan-600 text-white" : "text-zinc-300"
+                )}
+                onClick={() => setChartTf("M5")}
+              >
+                M5
+              </Button>
+              <Button
+                size="sm"
+                variant={chartTf === "M1" ? "default" : "ghost"}
+                disabled={!hasM1Candles}
+                title={hasM1Candles ? "View M1 LTF Execution Refinement Candles" : "M1 LTF candles load when S1+S2 pass or coin is pinned"}
+                className={cn(
+                  "h-7 px-2.5 text-[11px] font-mono font-bold gap-1",
+                  chartTf === "M1" ? "bg-violet-600 text-white" : "text-zinc-300"
+                )}
+                onClick={() => setChartTf("M1")}
+              >
+                M1
+                {isM1Active && <span className="w-1.5 h-1.5 rounded-full bg-amber-300 animate-pulse" />}
+              </Button>
+            </div>
+            <div className="flex items-center gap-1.5 bg-zinc-900 border border-zinc-800 rounded-lg p-1">
+              <span className="text-xs font-mono font-bold text-zinc-300 px-2">Zoom: {Math.round(zoomLevel * 100)}%</span>
+              <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setZoomLevel((z) => Math.min(3.5, Number((z + 0.35).toFixed(2))))}>
+                <ZoomIn className="w-4 h-4" />
+              </Button>
+              <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setZoomLevel((z) => Math.max(0.4, Number((z - 0.35).toFixed(2))))}>
+                <ZoomOut className="w-4 h-4" />
+              </Button>
+              <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setZoomLevel(1.0)}>
+                <RotateCcw className="w-3.5 h-3.5" />
+              </Button>
+            </div>
           </div>
         )}
       </div>
@@ -1072,8 +1104,22 @@ export function SmcChartOverlay({
               <Badge variant="outline" className={cn("text-[10px] px-2 py-0.5 font-bold", s1Pass && isM15Bullish ? "bg-emerald-500/20 text-emerald-300 border-emerald-500" : s1Pass && isM15Bearish ? "bg-rose-500/20 text-rose-300 border-rose-500" : "bg-zinc-800 text-zinc-300 border-zinc-700")}>
                 M15 Bias: {rawM15Bias}
               </Badge>
-              <Badge variant="outline" className="text-[10px] px-2 py-0.5 font-bold bg-cyan-500/20 text-cyan-300 border-cyan-500">
-                {realCandles && realCandles.length >= 8 ? "⚡ BINANCE M5 LIVE" : "⏳ CONNECTING BINANCE M5"}
+              <Badge
+                variant="outline"
+                className={cn(
+                  "text-[10px] px-2 py-0.5 font-bold",
+                  isM1Active
+                    ? "bg-violet-500/20 text-violet-300 border-violet-500"
+                    : "bg-cyan-500/20 text-cyan-300 border-cyan-500"
+                )}
+              >
+                {realCandles && realCandles.length >= 8
+                  ? wantM1
+                    ? "⚡ BINANCE M1 LTF LIVE"
+                    : isM1Active
+                    ? "⚡ BINANCE M5 + M1 LTF"
+                    : "⚡ BINANCE M5 LIVE"
+                  : "⏳ CONNECTING BINANCE"}
               </Badge>
             </div>
             <span className="font-black px-2 py-0.5 rounded bg-zinc-800 text-emerald-400 border border-zinc-700 text-[11px]">

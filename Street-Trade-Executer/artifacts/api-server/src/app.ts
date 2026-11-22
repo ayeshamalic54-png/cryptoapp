@@ -47,13 +47,26 @@ app.use("/api", router);
 
 // Serve static frontend files from Vite build output
 const clientDistPath = path.resolve(__dirname, "../../trading-dashboard/dist");
-app.use(express.static(clientDistPath));
+app.use(
+  express.static(clientDistPath, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith(".html")) {
+        res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+        res.setHeader("Pragma", "no-cache");
+        res.setHeader("Expires", "0");
+      }
+    },
+  })
+);
 
 // For all non-API routes, serve index.html (supports client-side routing)
 app.use((req, res, next) => {
   if (req.path.startsWith("/api")) {
     return next();
   }
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
   res.sendFile(path.join(clientDistPath, "index.html"), (err) => {
     if (err) {
       next();

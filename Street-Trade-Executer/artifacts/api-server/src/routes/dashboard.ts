@@ -249,10 +249,11 @@ router.get("/smc_telemetry", async (req, res) => {
         });
       }
 
-      // On-demand live Binance SMC computation (Futures Testnet/Mainnet + Vision CDN fallback)
-      const [m5Res, m15Res] = await Promise.all([
+      // On-demand live Binance SMC computation (Public Mainnet Futures + Vision CDN fallback)
+      const [m5Res, m15Res, m1Res] = await Promise.all([
         fetchBinanceKlinesWithMeta(resolvedSym, "5m", 100),
         fetchBinanceKlinesWithMeta(resolvedSym, "15m", 80),
+        fetchBinanceKlinesWithMeta(resolvedSym, "1m", 120),
       ]);
       if (m5Res.bars.length === 0 && dbMatch && dbHasCandles) {
         const dbZones = await db
@@ -284,7 +285,9 @@ router.get("/smc_telemetry", async (req, res) => {
         m5Res.bars,
         m15Res.bars,
         Number(botRow?.maxSlPct ?? 1.2),
-        Number(botRow?.leverage ?? 5)
+        Number(botRow?.leverage ?? 5),
+        1.35,
+        m1Res.bars
       );
       return res.json({
         telemetry: live.telemetry,

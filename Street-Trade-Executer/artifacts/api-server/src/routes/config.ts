@@ -413,4 +413,20 @@ router.post("/discord/test", async (req, res) => {
   }
 });
 
+router.post("/toggle-auto-execute", async (req, res) => {
+  try {
+    const { autoExecute } = (req.body ?? {}) as { autoExecute?: boolean };
+    if (typeof autoExecute !== "boolean") {
+      return res.status(400).json({ error: "autoExecute boolean is required" });
+    }
+    await db.execute(
+      sql`UPDATE bot_state SET auto_execute = ${autoExecute}, last_heartbeat = NOW() WHERE id = (SELECT id FROM bot_state ORDER BY id ASC LIMIT 1)`
+    );
+    return res.json({ status: "ok", autoExecute });
+  } catch (err) {
+    req.log.error({ err }, "Error toggling auto_execute");
+    return res.status(500).json({ error: "Database error updating autoExecute" });
+  }
+});
+
 export default router;

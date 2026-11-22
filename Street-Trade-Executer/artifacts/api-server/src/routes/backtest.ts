@@ -6,14 +6,15 @@ const router = Router();
 
 async function fetchPaginatedBinanceKlines(
   symbol: string,
-  interval: "5m" | "15m",
+  interval: "1m" | "5m" | "15m",
   startTimeMs: number,
   endTimeMs: number
 ): Promise<OhlcBar[]> {
   const sym = resolveBinanceSymbol(symbol);
   const allBars: OhlcBar[] = [];
   let cursor = startTimeMs;
-  const maxPages = interval === "5m" ? 8 : 3;
+  const maxPages = interval === "1m" ? 7 : interval === "5m" ? 8 : 3;
+  const stepMs = interval === "1m" ? 60_000 : interval === "5m" ? 300_000 : 900_000;
 
   for (let p = 0; p < maxPages && cursor < endTimeMs; p++) {
     const query = `symbol=${encodeURIComponent(
@@ -21,9 +22,22 @@ async function fetchPaginatedBinanceKlines(
     )}&interval=${interval}&startTime=${cursor}&endTime=${endTimeMs}&limit=1500`;
     let resp: Response | null = null;
     for (const base of ["https://fapi.binance.com", "https://testnet.binancefuture.com"]) {
-      const cand = await fetch(`${base}/fapi/v1/klines?${query}`, { signal: AbortSignal.timeout(8000) });
-      resp = cand;
-      if (cand.ok) break;
+      try {
+        const cand = await fetch(`${base}/fapi/v1/klines?${query}`, { signal: AbortSignal.timeout(8000) });
+        resp = cand;
+        if (cand.ok) break;
+      } catch {}
+    }
+    if (!resp || !resp.ok) {
+      try {
+        const visionQuery = `symbol=${encodeURIComponent(
+          sym
+        )}&interval=${interval}&startTime=${cursor}&endTime=${endTimeMs}&limit=1000`;
+        const cand = await fetch(`https://data-api.binance.vision/api/v3/klines?${visionQuery}`, {
+          signal: AbortSignal.timeout(8000),
+        });
+        if (cand.ok) resp = cand;
+      } catch {}
     }
     if (!resp || !resp.ok) {
       throw new Error(`Binance klines HTTP ${resp?.status ?? 0} for ${sym}`);
@@ -43,8 +57,8 @@ async function fetchPaginatedBinanceKlines(
     }
 
     const lastOpen = Number(raw[raw.length - 1]![0]);
-    if (raw.length < 1500 || lastOpen <= cursor) break;
-    cursor = lastOpen + (interval === "5m" ? 300_000 : 900_000);
+    if (raw.length < 1000 || lastOpen <= cursor) break;
+    cursor = lastOpen + stepMs;
   }
 
   // Deduplicate and sort strictly chronologically
@@ -80,10 +94,12 @@ router.post("/backtest", async (req, res) => {
     const startMs = endMs - days * 86_400_000;
     const warmupM5Start = startMs - 2 * 86_400_000;
     const warmupM15Start = startMs - 5 * 86_400_000;
+    const m1WindowStart = Math.max(startMs - 4 * 3600_000, endMs - 7 * 86_400_000);
 
-    const [m5Bars, m15Bars] = await Promise.all([
+    const [m5Bars, m15Bars, m1Bars] = await Promise.all([
       fetchPaginatedBinanceKlines(symbol, "5m", warmupM5Start, endMs),
       fetchPaginatedBinanceKlines(symbol, "15m", warmupM15Start, endMs),
+      fetchPaginatedBinanceKlines(symbol, "1m", m1WindowStart, endMs).catch(() => [] as OhlcBar[]),
     ]);
 
     if (m5Bars.length < 60 || m15Bars.length < 25) {
@@ -96,6 +112,7 @@ router.post("/backtest", async (req, res) => {
       symbol,
       m5Bars,
       m15Bars,
+      m1Bars,
       startTimeMs: startMs,
       initialBalance,
       accountMode,

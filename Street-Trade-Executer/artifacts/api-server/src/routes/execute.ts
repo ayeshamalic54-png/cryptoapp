@@ -3,6 +3,7 @@ import { db } from "@workspace/db";
 import { tradeCommandsTable } from "@workspace/db";
 import { ExecuteTradeBody } from "@workspace/api-zod";
 import { eq } from "drizzle-orm";
+import { triggerFastCycleNow } from "../lib/cryptoBotWorker";
 
 const router = Router();
 
@@ -28,6 +29,8 @@ router.post("/execute-trade", async (req, res) => {
         status: "PENDING",
       })
       .returning();
+
+    triggerFastCycleNow();
 
     res.json({
       commandId: cmd!.id,

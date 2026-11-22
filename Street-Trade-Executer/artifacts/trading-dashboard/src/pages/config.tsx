@@ -61,6 +61,7 @@ export default function Config() {
   const [newPass, setNewPass] = useState("");
   const [confirmPass, setConfirmPass] = useState("");
   const [discordTesting, setDiscordTesting] = useState(false);
+  const [togglingAutoExec, setTogglingAutoExec] = useState(false);
 
   const { data: config, isLoading } = useGetConfig({ query: { queryKey: getGetConfigQueryKey() } });
   const updateConfig = useUpdateConfig();
@@ -449,10 +450,38 @@ export default function Config() {
                                 {field.value ? <Zap className="w-3.5 h-3.5 text-emerald-400" /> : <ZapOff className="w-3.5 h-3.5 text-amber-400" />}
                                 Auto Execute (Pure SMC)
                               </FormLabel>
-                              <FormDescription className="text-[11px]">Single direct Futures order on 9/9 steps</FormDescription>
+                              <FormDescription className="text-[11px]">Scans Top 10 coins &amp; auto-executes on 9/9 steps</FormDescription>
                             </div>
                             <FormControl>
-                              <Switch checked={field.value} onCheckedChange={field.onChange} />
+                              <Switch
+                                checked={field.value}
+                                disabled={isReadOnly || togglingAutoExec}
+                                onCheckedChange={async (checked) => {
+                                  field.onChange(checked);
+                                  setTogglingAutoExec(true);
+                                  try {
+                                    const res = await fetch(getApiUrl("/api/toggle-auto-execute"), {
+                                      method: "POST",
+                                      headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({ autoExecute: checked }),
+                                    });
+                                    if (!res.ok) throw new Error("Failed to toggle Auto Execute");
+                                    queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
+                                    queryClient.invalidateQueries({ queryKey: getGetDashboardQueryKey() });
+                                    toast({
+                                      title: checked ? "Auto Execute ENABLED" : "Auto Execute DISABLED (Signal-Only)",
+                                      description: checked
+                                        ? "Top 10 Crypto SMC scanner will execute live Futures orders."
+                                        : "Top 10 scanner will send Discord signals only.",
+                                    });
+                                  } catch (err: any) {
+                                    field.onChange(!checked);
+                                    toast({ title: "Toggle Error", description: err?.message, variant: "destructive" });
+                                  } finally {
+                                    setTogglingAutoExec(false);
+                                  }
+                                }}
+                              />
                             </FormControl>
                           </div>
                         </FormItem>

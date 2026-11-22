@@ -170,28 +170,33 @@ function mapRawKlines(raw: any[], priceScale = 1): OhlcBar[] {
 type KlineMetaResult = { bars: OhlcBar[]; resolvedSymbol: string; marketType: "FUTURES" | "SPOT" };
 const klineCache = new Map<string, { ts: number; data: KlineMetaResult }>();
 const inFlightKlines = new Map<string, Promise<KlineMetaResult>>();
-const KLINE_CACHE_TTL_MS = 12_000;
+
+function getKlineCacheTtlMs(interval: "1m" | "5m" | "15m"): number {
+  if (interval === "15m") return 45_000;
+  if (interval === "5m") return 15_000;
+  return 10_000;
+}
 
 export async function fetchBinanceKlinesWithMeta(
   symbol: string,
-  interval: "5m" | "15m",
+  interval: "1m" | "5m" | "15m",
   limit = 120
 ): Promise<KlineMetaResult> {
   const sym = await resolveLiveBinanceSymbol(symbol);
-  const cacheKey = `${getBinanceBaseUrl()}|${sym}|${interval}|${limit}`;
+  const ttlMs = getKlineCacheTtlMs(interval);
+  const cacheKey = `${sym}|${interval}|${limit}`;
   const cached = klineCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < KLINE_CACHE_TTL_MS && cached.data.bars.length > 0) {
+  if (cached && Date.now() - cached.ts < ttlMs && cached.data.bars.length > 0) {
     return cached.data;
   }
   const existingFlight = inFlightKlines.get(cacheKey);
   if (existingFlight) return existingFlight;
 
   const task = (async (): Promise<KlineMetaResult> => {
-    const endpoints = [...new Set([getBinanceBaseUrl(), "https://fapi.binance.com"])];
-    for (const base of endpoints) {
-      if (getHostCooldownState(base).coolingDown) continue;
+    // Always query public Mainnet Futures first so scanner/chart klines never consume Testnet signed-IP quota
+    if (!getHostCooldownState("https://fapi.binance.com").coolingDown) {
       const raw = await fetchJsonSafe(
-        `${base}/fapi/v1/klines?symbol=${encodeURIComponent(sym)}&interval=${interval}&limit=${limit}`,
+        `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(sym)}&interval=${interval}&limit=${limit}`,
         7000
       );
       if (Array.isArray(raw) && raw.length > 0) {
@@ -201,7 +206,7 @@ export async function fetchBinanceKlinesWithMeta(
       }
     }
 
-    // Geo-block / Testnet unlisted fallback via Binance Vision public CDN
+    // Geo-block fallback via Binance Vision public CDN before touching Testnet
     const catalogType = await getSymbolMarketType(sym);
     const spotRaw = await fetchJsonSafe(
       `https://data-api.binance.vision/api/v3/klines?symbol=${encodeURIComponent(sym)}&interval=${interval}&limit=${limit}`,
@@ -224,10 +229,23 @@ export async function fetchBinanceKlinesWithMeta(
         return res;
       }
     }
+
+    const activeBase = getBinanceBaseUrl();
+    if (activeBase !== "https://fapi.binance.com" && !getHostCooldownState(activeBase).coolingDown) {
+      const raw = await fetchJsonSafe(
+        `${activeBase}/fapi/v1/klines?symbol=${encodeURIComponent(sym)}&interval=${interval}&limit=${limit}`,
+        7000
+      );
+      if (Array.isArray(raw) && raw.length > 0) {
+        const res: KlineMetaResult = { bars: mapRawKlines(raw, 1), resolvedSymbol: sym, marketType: "FUTURES" };
+        klineCache.set(cacheKey, { ts: Date.now(), data: res });
+        return res;
+      }
+    }
     return cached?.data ?? { bars: [], resolvedSymbol: sym, marketType: catalogType };
   })().finally(() => {
     inFlightKlines.delete(cacheKey);
-    if (klineCache.size > 300) {
+    if (klineCache.size > 400) {
       const oldestKey = klineCache.keys().next().value;
       if (oldestKey) klineCache.delete(oldestKey);
     }
@@ -237,7 +255,7 @@ export async function fetchBinanceKlinesWithMeta(
   return task;
 }
 
-export async function fetchBinanceKlines(symbol: string, interval: "5m" | "15m", limit = 120): Promise<OhlcBar[]> {
+export async function fetchBinanceKlines(symbol: string, interval: "1m" | "5m" | "15m", limit = 120): Promise<OhlcBar[]> {
   const res = await fetchBinanceKlinesWithMeta(symbol, interval, limit);
   return res.bars;
 }
@@ -264,11 +282,12 @@ router.get("/binance/symbols", async (req, res) => {
 router.get("/binance/klines", async (req, res) => {
   try {
     const reqSym = resolveBinanceSymbol(String(req.query.symbol ?? "BTCUSDT"));
-    const [m5Res, m15Res] = await Promise.all([
+    const [m5Res, m15Res, m1Res] = await Promise.all([
       fetchBinanceKlinesWithMeta(reqSym, "5m", 100),
       fetchBinanceKlinesWithMeta(reqSym, "15m", 80),
+      fetchBinanceKlinesWithMeta(reqSym, "1m", 120),
     ]);
-    const live = analyzeLiveSmcTelemetry(m5Res.resolvedSymbol, m5Res.bars, m15Res.bars);
+    const live = analyzeLiveSmcTelemetry(m5Res.resolvedSymbol, m5Res.bars, m15Res.bars, 1.2, 5, 1.35, m1Res.bars);
     return res.json({ ...live, resolvedSymbol: m5Res.resolvedSymbol, marketType: m5Res.marketType });
   } catch (err) {
     req.log.error({ err }, "Failed to fetch live Binance SMC analysis");

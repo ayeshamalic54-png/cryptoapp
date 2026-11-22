@@ -805,6 +805,312 @@ function isM15EquilibriumAligned(isBuy: boolean, m15Bars: OhlcBar[], entryPrice:
   return isBuy ? pos48 <= 0.60 && pos24 <= 0.72 : pos48 >= 0.40 && pos24 >= 0.28;
 }
 
+/** Shared SL/TP bracket & fee-adjusted RRR validation across Strict M5 and M1 LTF entries. */
+function finalizeSmcBracket(
+  isBull: boolean,
+  slAnchor: number,
+  entryPrice: number,
+  m15Bars: OhlcBar[],
+  maxSlPct: number,
+  leverage: number,
+  minTargetRrr: number,
+  scale: CryptoScale,
+  minRawSlPct: number
+): { s8Ok: boolean; s9Ok: boolean; slPrice: number; tpPrice: number; rrr: number } {
+  const rawSlPrice = rndPrice(isBull ? slAnchor - scale.slBuf : slAnchor + scale.slBuf, scale.digits);
+  const rawSlDist = isBull ? entryPrice - rawSlPrice : rawSlPrice - entryPrice;
+  const rawSlPct = entryPrice > 0 ? (rawSlDist / entryPrice) * 100 : 99;
+  const liqSafe = Math.min(maxSlPct, 60 / Math.max(1, leverage));
+  if (rawSlDist <= 0 || rawSlPct < minRawSlPct || rawSlPct > liqSafe) {
+    return { s8Ok: false, s9Ok: false, slPrice: 0, tpPrice: 0, rrr: 0 };
+  }
+
+  // Widen cleanly to a 0.50% crypto noise breathing floor when maxSl allows (matching backtested edge)
+  const minFloorDist = liqSafe >= 0.5 ? entryPrice * 0.005 : 0;
+  const slPrice =
+    rawSlDist < minFloorDist
+      ? rndPrice(isBull ? entryPrice - minFloorDist : entryPrice + minFloorDist, scale.digits)
+      : rawSlPrice;
+  const slDist = isBull ? entryPrice - slPrice : slPrice - entryPrice;
+  const s8Ok = slDist > 0;
+
+  const targ = computeM15OpposingTarget(isBull, m15Bars, entryPrice, rawSlDist, minTargetRrr, scale);
+  const rawTpDist = Math.abs(targ.tpPrice - entryPrice);
+  const cappedTpDist = Math.min(rawTpDist, slDist * 1.75);
+  const finalTpPrice = rndPrice(isBull ? entryPrice + cappedTpDist : entryPrice - cappedTpDist, scale.digits);
+  const actualTpDist = Math.abs(finalTpPrice - entryPrice);
+  const cappedRrr = slDist > 0 ? Number((actualTpDist / slDist).toFixed(2)) : 0;
+  const feeEst = entryPrice * 0.0007; // 0.05% taker entry + 0.02% maker TP
+  const netRrr = (actualTpDist - feeEst) / (slDist + feeEst);
+  const minPostWidenRrr = Math.max(1.25, minTargetRrr - 0.1);
+  const minNetRrr = Math.max(1.15, minTargetRrr - 0.2);
+
+  const s9Ok =
+    targ.tpPrice > 0 &&
+    targ.rrr >= minTargetRrr &&
+    targ.rrr <= 3.5 &&
+    cappedRrr >= minPostWidenRrr &&
+    netRrr >= minNetRrr;
+
+  return { s8Ok, s9Ok, slPrice, tpPrice: finalTpPrice, rrr: cappedRrr };
+}
+
+interface M1LtfEvaluation {
+  hasM1Choch: boolean;
+  chochLvl: number;
+  chochIdx: number;
+  rejIdx: number;
+  m1Fvgs: ZoneBox[];
+  hasM1Retest: boolean;
+  hasM1Rej: boolean;
+  s7Ok: boolean;
+  s8Ok: boolean;
+  s9Ok: boolean;
+  slPrice: number;
+  tpPrice: number;
+  rrr: number;
+  action: "BUY" | "SELL" | "NONE";
+  stepProgress: number;
+  sliceStart: number;
+}
+
+/**
+ * Evaluates M1 LTF Execution Refinement following a confirmed M5 Liquidity Sweep:
+ * M15 Bias -> M5 Sweep -> M1 CHoCH -> M1 Displacement FVG -> Closed M1 FVG Retest & Rejection
+ * -> 1m Rejection Follow-Through Hold -> 0.50% Crypto Sweep SL Floor -> M15 Opposing Unbroken Liquidity Target.
+ */
+function evaluateM1LtfRefinement(
+  isBull: boolean,
+  m5ClosedBars: OhlcBar[],
+  m15Bars: OhlcBar[],
+  m1ClosedBars: OhlcBar[],
+  sw: SweepResult,
+  entryPrice: number,
+  maxSlPct: number,
+  leverage: number,
+  minTargetRrr: number,
+  scale: CryptoScale
+): M1LtfEvaluation | null {
+  const n1 = m1ClosedBars.length;
+  if (!sw.found || sw.sweepIdx < 0 || sw.sweepIdx >= m5ClosedBars.length || n1 < 26) return null;
+
+  // Require 1 completed M1 follow-through bar after the Rejection bar before executing
+  const m1Base = m1ClosedBars.slice(0, -1);
+  const nBase = m1Base.length;
+  const followBar = m1ClosedBars[n1 - 1]!;
+  const swTime = m5ClosedBars[sw.sweepIdx]!.time;
+  let anchorIdx = -1;
+  let m1Extreme = isBull ? Infinity : -Infinity;
+  for (let k = 0; k < nBase - 3; k++) {
+    const t = m1Base[k]!.time;
+    if (t >= swTime - 60_000 && t <= swTime + 5 * 60_000) {
+      if (isBull && m1Base[k]!.low < m1Extreme) {
+        m1Extreme = m1Base[k]!.low;
+        anchorIdx = k;
+      }
+      if (!isBull && m1Base[k]!.high > m1Extreme) {
+        m1Extreme = m1Base[k]!.high;
+        anchorIdx = k;
+      }
+    }
+  }
+  if (anchorIdx < 2 || anchorIdx >= nBase - 3 || nBase - 1 - anchorIdx > 60) return null;
+
+  const trueExtreme = isBull ? Math.min(sw.sweepExtreme, m1Extreme) : Math.max(sw.sweepExtreme, m1Extreme);
+  for (let k = anchorIdx + 1; k < nBase; k++) {
+    if ((isBull && m1Base[k]!.close < trueExtreme) || (!isBull && m1Base[k]!.close > trueExtreme)) {
+      return null;
+    }
+  }
+
+  const sliceStart = Math.max(0, anchorIdx - 25);
+  const m1Slice = m1Base.slice(sliceStart);
+  const aIdx = anchorIdx - sliceStart;
+  const ns = m1Slice.length;
+  if (aIdx < 2 || ns < 6) return null;
+
+  const m1MinAmp = scale.refPrice * 0.00025;
+  let { highs: sh, lows: sl } = getSwingPoints(m1Slice, 2, 2, m1MinAmp);
+  let prior = (isBull ? sh : sl).filter(([, idx]) => idx < aIdx);
+  if (!prior.length) {
+    ({ highs: sh, lows: sl } = getSwingPoints(m1Slice, 2, 2, 0));
+    prior = (isBull ? sh : sl).filter(([, idx]) => idx < aIdx);
+  }
+  let chochLvl = prior.length ? prior[prior.length - 1]![0] : isBull ? 0 : Infinity;
+  if (!prior.length) {
+    for (let k = Math.max(0, aIdx - 6); k < aIdx; k++) {
+      chochLvl = isBull ? Math.max(chochLvl, m1Slice[k]!.high) : Math.min(chochLvl, m1Slice[k]!.low);
+    }
+  }
+
+  let chochRelIdx = -1;
+  for (let j = aIdx + 1; j < ns; j++) {
+    if ((isBull && m1Slice[j]!.close > chochLvl) || (!isBull && m1Slice[j]!.close < chochLvl)) {
+      chochRelIdx = j;
+      break;
+    }
+  }
+  const hasM1Choch = chochRelIdx >= 0 && ns - 1 - chochRelIdx <= 25;
+  if (!hasM1Choch) return null;
+
+  const m1MinGap = scale.refPrice * 0.00018;
+  const m1MitTol = scale.refPrice * 0.00008;
+  const maxLeg = Math.min(ns - 1, chochRelIdx + 2);
+  const m1Fvgs: ZoneBox[] = [];
+  for (let k = Math.max(2, aIdx); k <= maxLeg; k++) {
+    if (isBull) {
+      const gap = m1Slice[k]!.low - m1Slice[k - 2]!.high;
+      if (gap >= m1MinGap && m1Slice[k - 2]!.high >= trueExtreme - scale.sweepMargin) {
+        let mit = false;
+        for (let j = k + 1; j < ns - 1; j++) {
+          if (m1Slice[j]!.close < m1Slice[k - 2]!.high - m1MitTol) {
+            mit = true;
+            break;
+          }
+        }
+        if (!mit) m1Fvgs.push({ low: m1Slice[k - 2]!.high, high: m1Slice[k]!.low, idx: k });
+      }
+    } else {
+      const gap = m1Slice[k - 2]!.low - m1Slice[k]!.high;
+      if (gap >= m1MinGap && m1Slice[k - 2]!.low <= trueExtreme + scale.sweepMargin) {
+        let mit = false;
+        for (let j = k + 1; j < ns - 1; j++) {
+          if (m1Slice[j]!.close > m1Slice[k - 2]!.low + m1MitTol) {
+            mit = true;
+            break;
+          }
+        }
+        if (!mit) m1Fvgs.push({ low: m1Slice[k]!.high, high: m1Slice[k - 2]!.low, idx: k });
+      }
+    }
+  }
+
+  let hasM1Retest = false;
+  let hasM1Rej = false;
+  let s7Ok = false;
+  let s8Ok = false;
+  let s9Ok = false;
+  let slPrice = 0;
+  let tpPrice = 0;
+  let rrr = 0;
+  let action: "BUY" | "SELL" | "NONE" = "NONE";
+
+  if (m1Fvgs.length > 0) {
+    const closedM1 = m1Slice[ns - 1]!;
+    const prevM1 = m1Slice[ns - 2]!;
+    const m1CloseTol = scale.refPrice * 0.00012;
+    const m1WickBuf = scale.refPrice * 0.00025;
+    let matched: ZoneBox | null = null;
+    for (let z = m1Fvgs.length - 1; z >= 0; z--) {
+      const f = m1Fvgs[z]!;
+      if (ns - 1 <= f.idx) continue;
+      const gap = Math.max(0, f.high - f.low);
+      const pen = gap >= m1MinGap * 2.1 ? 0.35 * gap : 0;
+      const direct = isBull
+        ? closedM1.low <= f.high - pen && closedM1.low >= f.low - m1WickBuf && closedM1.close >= f.low - m1CloseTol
+        : closedM1.high >= f.low + pen && closedM1.high <= f.high + m1WickBuf && closedM1.close <= f.high + m1CloseTol;
+      const twoBar =
+        ns - 2 > f.idx &&
+        (isBull
+          ? prevM1.low <= f.high - pen &&
+            prevM1.low >= f.low - m1WickBuf &&
+            prevM1.close >= f.low - m1CloseTol &&
+            closedM1.close >= f.low &&
+            closedM1.close >= closedM1.open
+          : prevM1.high >= f.low + pen &&
+            prevM1.high <= f.high + m1WickBuf &&
+            prevM1.close <= f.high + m1CloseTol &&
+            closedM1.close <= f.high &&
+            closedM1.close <= closedM1.open);
+      if (direct || twoBar) {
+        matched = f;
+        break;
+      }
+    }
+
+    if (matched) {
+      hasM1Retest = true;
+      const rng = Math.max(scale.refPrice * 1e-5, closedM1.high - closedM1.low);
+      const body = Math.abs(closedM1.close - closedM1.open);
+      const lw = Math.min(closedM1.open, closedM1.close) - closedM1.low;
+      const uw = closedM1.high - Math.max(closedM1.open, closedM1.close);
+      hasM1Rej = isBull
+        ? (closedM1.close > closedM1.open && body / rng >= 0.25 && closedM1.close >= matched.low) ||
+          (lw / rng >= 0.45 && closedM1.open - closedM1.close <= 0.2 * rng)
+        : (closedM1.close < closedM1.open && body / rng >= 0.25 && closedM1.close <= matched.high) ||
+          (uw / rng >= 0.45 && closedM1.close - closedM1.open <= 0.2 * rng);
+
+      if (hasM1Rej) {
+        const followHeld = isBull ? followBar.close >= trueExtreme : followBar.close <= trueExtreme;
+        const notChasing = isBull
+          ? entryPrice <= matched.high + scale.refPrice * 0.0022
+          : entryPrice >= matched.low - scale.refPrice * 0.0022;
+        s7Ok = followHeld && notChasing && isM15EquilibriumAligned(isBull, m15Bars, entryPrice);
+      }
+
+      if (s7Ok) {
+        const slAnchor = computeProtectedSweepAnchor(
+          m5ClosedBars,
+          m5ClosedBars.length - 1,
+          trueExtreme,
+          isBull,
+          scale
+        );
+        const bracket = finalizeSmcBracket(
+          isBull,
+          slAnchor,
+          entryPrice,
+          m15Bars,
+          maxSlPct,
+          leverage,
+          minTargetRrr,
+          scale,
+          0.25
+        );
+        slPrice = bracket.slPrice;
+        tpPrice = bracket.tpPrice;
+        rrr = bracket.rrr;
+        s8Ok = bracket.s8Ok;
+        s9Ok = bracket.s9Ok;
+        if (bracket.s8Ok && bracket.s9Ok) {
+          action = isBull ? "BUY" : "SELL";
+        }
+      }
+    }
+  }
+
+  const stepProgress = [
+    true,
+    true,
+    hasM1Choch,
+    m1Fvgs.length > 0,
+    hasM1Retest,
+    hasM1Rej,
+    s7Ok,
+    s8Ok,
+    s9Ok,
+  ].filter(Boolean).length;
+
+  return {
+    hasM1Choch,
+    chochLvl,
+    chochIdx: sliceStart + chochRelIdx,
+    rejIdx: sliceStart + ns - 1,
+    m1Fvgs,
+    hasM1Retest,
+    hasM1Rej,
+    s7Ok,
+    s8Ok,
+    s9Ok,
+    slPrice,
+    tpPrice,
+    rrr,
+    action,
+    stepProgress,
+    sliceStart,
+  };
+}
+
 function evaluateClosedSmcSetup(
   closedBars: OhlcBar[],
   m15Bars: OhlcBar[],
@@ -873,41 +1179,24 @@ function evaluateClosedSmcSetup(
           }
           if (s7Ok) {
             const slAnchor = computeProtectedSweepAnchor(closedBars, closedIdx, sw.sweepExtreme, isBull, scale);
-            const rawSlPrice = rndPrice(isBull ? slAnchor - scale.slBuf : slAnchor + scale.slBuf, scale.digits);
-            const rawSlDist = isBull ? entryPrice - rawSlPrice : rawSlPrice - entryPrice;
-            const rawSlPct = entryPrice > 0 ? (rawSlDist / entryPrice) * 100 : 99;
-            const liqSafe = Math.min(maxSlPct, 60 / Math.max(1, leverage));
-            // Structural minimum 0.35% stop, widened cleanly to a 0.50% crypto noise breathing floor when maxSl allows
-            if (rawSlDist > 0 && rawSlPct >= 0.35 && rawSlPct <= liqSafe) {
-              const minFloorDist = liqSafe >= 0.5 ? entryPrice * 0.005 : 0;
-              slPrice =
-                rawSlDist < minFloorDist
-                  ? rndPrice(isBull ? entryPrice - minFloorDist : entryPrice + minFloorDist, scale.digits)
-                  : rawSlPrice;
-              const slDist = isBull ? entryPrice - slPrice : slPrice - entryPrice;
-              s8Ok = slDist > 0;
-              const targ = computeM15OpposingTarget(isBull, m15Bars, entryPrice, rawSlDist, minTargetRrr, scale);
-              const rawTpDist = Math.abs(targ.tpPrice - entryPrice);
-              const cappedTpDist = Math.min(rawTpDist, slDist * 1.75);
-              const finalTpPrice = rndPrice(isBull ? entryPrice + cappedTpDist : entryPrice - cappedTpDist, scale.digits);
-              const actualTpDist = Math.abs(finalTpPrice - entryPrice);
-              const cappedRrr = slDist > 0 ? Number((actualTpDist / slDist).toFixed(2)) : 0;
-              tpPrice = finalTpPrice;
-              rrr = cappedRrr;
-              const feeEst = entryPrice * 0.0007; // 0.05% taker entry + 0.02% maker TP
-              const netRrr = (actualTpDist - feeEst) / (slDist + feeEst);
-              const minPostWidenRrr = Math.max(1.25, minTargetRrr - 0.1);
-              const minNetRrr = Math.max(1.15, minTargetRrr - 0.2);
-              if (
-                targ.tpPrice > 0 &&
-                targ.rrr >= minTargetRrr &&
-                targ.rrr <= 3.5 &&
-                cappedRrr >= minPostWidenRrr &&
-                netRrr >= minNetRrr
-              ) {
-                s9Ok = true;
-                action = isBull ? "BUY" : "SELL";
-              }
+            const bracket = finalizeSmcBracket(
+              isBull,
+              slAnchor,
+              entryPrice,
+              m15Bars,
+              maxSlPct,
+              leverage,
+              minTargetRrr,
+              scale,
+              0.35
+            );
+            slPrice = bracket.slPrice;
+            tpPrice = bracket.tpPrice;
+            rrr = bracket.rrr;
+            s8Ok = bracket.s8Ok;
+            s9Ok = bracket.s9Ok;
+            if (bracket.s8Ok && bracket.s9Ok) {
+              action = isBull ? "BUY" : "SELL";
             }
           }
         }
@@ -939,8 +1228,8 @@ function evaluateClosedSmcSetup(
 }
 
 /**
- * Computes real-time 9-Step Telemetry + M5 Candlestick Feed + Active SMC Zones (FVG, iFVG, OB, BREAKER)
- * for ANY searched Binance coin on-the-fly.
+ * Computes real-time 9-Step Telemetry + M5/M1 Candlestick Feed + Active SMC Zones (FVG, iFVG, OB, BREAKER)
+ * for ANY searched Binance coin on-the-fly, combining Strict M5 with Forex-style M1 LTF Refinement.
  */
 export function analyzeLiveSmcTelemetry(
   symbol: string,
@@ -948,7 +1237,8 @@ export function analyzeLiveSmcTelemetry(
   m15Bars: OhlcBar[],
   maxSlPct = 1.2,
   leverage = 5,
-  minTargetRrr = 1.35
+  minTargetRrr = 1.35,
+  m1Bars?: OhlcBar[]
 ) {
   const symUpper = resolveBinanceSymbol(symbol);
   if (!m5Bars.length || !m15Bars.length) {
@@ -961,18 +1251,52 @@ export function analyzeLiveSmcTelemetry(
       tpPrice: 0,
       rrr: 0,
       stepProgress: 0,
+      executionMode: "M5_STRICT" as const,
+      sweepKey: "",
     };
   }
 
   const closedBars = m5Bars.length > 20 ? m5Bars.slice(0, -1) : m5Bars;
   const closedIdx = closedBars.length - 1;
-  const livePrice = m5Bars[m5Bars.length - 1]!.close;
+  const livePrice =
+    m1Bars && m1Bars.length > 0 ? m1Bars[m1Bars.length - 1]!.close : m5Bars[m5Bars.length - 1]!.close;
   const scale = computeCryptoScale(livePrice);
   const allZones = detectSmcZones(m5Bars, scale, 0);
 
   const ev = evaluateClosedSmcSetup(closedBars, m15Bars, livePrice, maxSlPct, leverage, minTargetRrr, scale);
-  const { m15Bias, isBull, isBear, hasSweep, sw, chochOk, chochLvl, chochIdx, fvgOk, legFvgs, retestOk, s6Ok, s7Ok, s8Ok, s9Ok, slPrice, action } = ev;
-  let { tpPrice, rrr } = ev;
+  const { m15Bias, isBull, isBear, hasSweep, sw } = ev;
+  let { chochOk, chochLvl, chochIdx, fvgOk, legFvgs, retestOk, s6Ok, s7Ok, s8Ok, s9Ok, slPrice, tpPrice, rrr, action } = ev;
+
+  const m5StepProgress = [isBull || isBear, hasSweep, chochOk, fvgOk, retestOk, s6Ok, s7Ok, s8Ok, s9Ok].filter(Boolean).length;
+  const m1ClosedBars = m1Bars && m1Bars.length > 25 ? m1Bars.slice(0, -1) : m1Bars ?? [];
+  const m1Ev =
+    ev.action === "NONE" && (isBull || isBear) && hasSweep && m1ClosedBars.length >= 25
+      ? evaluateM1LtfRefinement(isBull, closedBars, m15Bars, m1ClosedBars, sw, livePrice, maxSlPct, leverage, minTargetRrr, scale)
+      : null;
+
+  const useM1Telemetry = Boolean(
+    m1Ev && (m1Ev.action !== "NONE" || !ev.chochOk || m1Ev.stepProgress >= m5StepProgress)
+  );
+  if (useM1Telemetry && m1Ev) {
+    chochOk = m1Ev.hasM1Choch;
+    chochLvl = m1Ev.chochLvl;
+    chochIdx = m1Ev.chochIdx;
+    fvgOk = m1Ev.m1Fvgs.length > 0;
+    legFvgs = m1Ev.m1Fvgs;
+    retestOk = m1Ev.hasM1Retest;
+    s6Ok = m1Ev.hasM1Rej;
+    s7Ok = m1Ev.s7Ok;
+    s8Ok = m1Ev.s8Ok;
+    s9Ok = m1Ev.s9Ok;
+    if (m1Ev.slPrice > 0) slPrice = m1Ev.slPrice;
+    if (m1Ev.tpPrice > 0) tpPrice = m1Ev.tpPrice;
+    if (m1Ev.rrr > 0) rrr = m1Ev.rrr;
+    action = m1Ev.action;
+  }
+
+  const executionMode: "M5_STRICT" | "M1_LTF" = useM1Telemetry ? "M1_LTF" : "M5_STRICT";
+  const swTime = hasSweep && sw.sweepIdx >= 0 && sw.sweepIdx < closedBars.length ? closedBars[sw.sweepIdx]!.time : 0;
+  const sweepKey = hasSweep && swTime > 0 ? `${isBull ? "B" : "S"}:${swTime}` : "";
 
   if (tpPrice <= 0 && (isBull || isBear)) {
     const estAnchor = hasSweep ? computeProtectedSweepAnchor(closedBars, closedIdx, sw.sweepExtreme, isBull, scale) : 0;
@@ -995,14 +1319,52 @@ export function analyzeLiveSmcTelemetry(
       close: c.close,
       volume: c.volume ?? 100,
       isSweep: Boolean(hasSweep && absIdx === sw.sweepIdx),
-      isChoch: Boolean(chochOk && absIdx === chochIdx),
-      isRetest: Boolean(retestOk && absIdx === closedIdx),
-      isRejection: Boolean(s6Ok && absIdx === closedIdx),
+      isChoch: Boolean(!useM1Telemetry && chochOk && absIdx === chochIdx),
+      isRetest: Boolean(!useM1Telemetry && retestOk && absIdx === closedIdx),
+      isRejection: Boolean(!useM1Telemetry && s6Ok && absIdx === closedIdx),
     };
   });
 
-  const bullFvgArr = (fvgOk && isBull ? legFvgs : allZones.bullFvg).map((z) => [z.low, z.high]);
-  const bearFvgArr = (fvgOk && isBear ? legFvgs : allZones.bearFvg).map((z) => [z.low, z.high]);
+  const m1List = m1Bars ?? [];
+  const m1Start = Math.max(0, m1List.length - 60);
+  const m1ClosedLastIdx = m1ClosedBars.length - 1;
+  let m1SweepBarAbsIdx = -1;
+  if (hasSweep && swTime > 0 && m1List.length > 0) {
+    let bestExt = isBull ? Infinity : -Infinity;
+    for (let k = m1Start; k < m1List.length; k++) {
+      const t = m1List[k]!.time;
+      if (t >= swTime - 60_000 && t <= swTime + 5 * 60_000) {
+        if (isBull && m1List[k]!.low < bestExt) {
+          bestExt = m1List[k]!.low;
+          m1SweepBarAbsIdx = k;
+        }
+        if (!isBull && m1List[k]!.high > bestExt) {
+          bestExt = m1List[k]!.high;
+          m1SweepBarAbsIdx = k;
+        }
+      }
+    }
+  }
+  const candlesM1 = m1List.slice(m1Start).map((c, relIdx) => {
+    const absIdx = m1Start + relIdx;
+    return {
+      time: formatPktHhMm(c.time),
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: c.volume ?? 100,
+      isSweep: Boolean(m1SweepBarAbsIdx >= 0 && absIdx === m1SweepBarAbsIdx),
+      isChoch: Boolean(m1Ev && m1Ev.hasM1Choch && absIdx === m1Ev.chochIdx),
+      isRetest: Boolean(m1Ev && m1Ev.hasM1Retest && absIdx === m1Ev.rejIdx),
+      isRejection: Boolean(m1Ev && m1Ev.hasM1Rej && absIdx === m1Ev.rejIdx),
+    };
+  });
+
+  const bullFvgArr = (!useM1Telemetry && fvgOk && isBull ? legFvgs : allZones.bullFvg).map((z) => [z.low, z.high]);
+  const bearFvgArr = (!useM1Telemetry && fvgOk && isBear ? legFvgs : allZones.bearFvg).map((z) => [z.low, z.high]);
+  const m1BullFvgArr = m1Ev && isBull ? m1Ev.m1Fvgs.map((z) => [z.low, z.high]) : [];
+  const m1BearFvgArr = m1Ev && isBear ? m1Ev.m1Fvgs.map((z) => [z.low, z.high]) : [];
 
   const activeZones: Array<{ type: string; label: string; range: string }> = [];
   const pushZones = (items: ZoneBox[], typeKey: string, title: string, bull: boolean) => {
@@ -1045,6 +1407,8 @@ export function analyzeLiveSmcTelemetry(
     tpPrice,
     rrr,
     stepProgress,
+    executionMode,
+    sweepKey,
     rawZones,
     activeZones,
     telemetry: {
@@ -1052,11 +1416,11 @@ export function analyzeLiveSmcTelemetry(
       m15_bias: m15Bias === "BULLISH" ? "BULLISH 🟢" : m15Bias === "BEARISH" ? "BEARISH 🔴" : "NEUTRAL ⚪",
       sweep_status: hasSweep ? "PASS 🟢 (M5 Sweep)" : "FAIL ⚪",
       sweep_price: hasSweep ? rndPrice(sw.sweepExtreme, scale.digits) : 0,
-      choch_status: chochOk ? "PASS 🟢 (CHoCH)" : "FAIL ⚪",
+      choch_status: chochOk ? (useM1Telemetry ? "PASS 🟢 (M1 CHoCH)" : "PASS 🟢 (CHoCH)") : "FAIL ⚪",
       choch_price: chochOk ? rndPrice(chochLvl, scale.digits) : 0,
-      fvg_status: fvgOk ? `PASS 🟢 (${legFvgs.length} FVG)` : "FAIL ⚪",
-      retest_status: retestOk ? "PASS 🟢 (Retested)" : "FAIL ⚪",
-      s6_status: s6Ok ? "PASS 🟢 (Rejection)" : "FAIL ⚪",
+      fvg_status: fvgOk ? `PASS 🟢 (${legFvgs.length} ${useM1Telemetry ? "M1 " : ""}FVG)` : "FAIL ⚪",
+      retest_status: retestOk ? `PASS 🟢 (${useM1Telemetry ? "M1 " : ""}Retested)` : "FAIL ⚪",
+      s6_status: s6Ok ? `PASS 🟢 (${useM1Telemetry ? "M1 " : ""}Rejection)` : "FAIL ⚪",
       s7_status: s7Ok ? "PASS 🟢 (Confirmed)" : "FAIL ⚪",
       s8_status: s8Ok ? `PASS 🟢 (SL Protected)` : "",
       s9_status: s9Ok ? `PASS 🟢 (${rrr}R M15 Target)` : "",
@@ -1064,10 +1428,16 @@ export function analyzeLiveSmcTelemetry(
       fvg_bounds_json: JSON.stringify({
         bullish_fvg: bullFvgArr,
         bearish_fvg: bearFvgArr,
+        m1_bullish_fvg: m1BullFvgArr,
+        m1_bearish_fvg: m1BearFvgArr,
         opposing_tp: tpPrice,
         sl_price: slPrice,
         step_progress: stepProgress,
+        execution_mode: executionMode,
+        m1_active: useM1Telemetry,
+        sweep_key: sweepKey,
         candles,
+        candles_m1: candlesM1,
       }),
     },
   };
@@ -1077,6 +1447,7 @@ export interface CryptoBacktestParams {
   symbol: string;
   m5Bars: OhlcBar[];
   m15Bars: OhlcBar[];
+  m1Bars?: OhlcBar[];
   startTimeMs: number;
   initialBalance: number;
   accountMode: "PROP_FIRM" | "PERSONAL";
@@ -1105,6 +1476,7 @@ export interface CryptoTradeSim {
   profitPercent: number;
   breakevenTriggered: boolean;
   sessionLabel: string;
+  entryTf?: "M5" | "M1";
   reason: "TP_HIT" | "BREAKEVEN_LOCKED" | "SL_HIT" | "OPEN_END";
   entryTime: string;
   exitTime: string;
@@ -1151,6 +1523,7 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
     symbol,
     m5Bars,
     m15Bars,
+    m1Bars,
     startTimeMs,
     initialBalance,
     accountMode,
@@ -1187,6 +1560,7 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
     breakevenApplied: boolean;
     entryTimeMs: number;
     sessionLabel: string;
+    entryTf: "M5" | "M1";
   }
 
   let openPos: OpenPos | null = null;
@@ -1195,7 +1569,8 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
   let posRealizedUsd = 0;
   let posRealizedGrossUsd = 0;
   let posPartialTaken = false;
-  let lastTradeExitBar = -10;
+  let lastTradeExitTimeMs = -Infinity;
+  const usedSweeps = new Set<string>();
   const trades: CryptoTradeSim[] = [];
   const equityCurve: Array<{ time: string; balance: number }> = [
     { time: new Date(Math.max(startTimeMs, m5Bars[0]!.time)).toISOString(), balance },
@@ -1234,6 +1609,7 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
       profitPercent: profitPct,
       breakevenTriggered: pos.breakevenApplied,
       sessionLabel: pos.sessionLabel,
+      entryTf: pos.entryTf,
       reason,
       entryTime: new Date(pos.entryTimeMs).toISOString(),
       exitTime: new Date(exitTimeMs).toISOString(),
@@ -1241,55 +1617,105 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
     equityCurve.push({ time: new Date(exitTimeMs).toISOString(), balance });
   };
 
-  for (let i = 45; i < m5Bars.length - 1; i++) {
+  const advanceOpenPosition = (currBar: OhlcBar): boolean => {
+    if (!openPos) return false;
+    let exitPrice: number | null = null;
+    let reason: CryptoTradeSim["reason"] | null = null;
+    const isLong = openPos.type === "BUY";
+
+    const takePartialTp1 = (pos: OpenPos) => {
+      const tp1Price = isLong ? pos.entryPrice + pos.slDist * 0.85 : pos.entryPrice - pos.slDist * 0.85;
+      const partialQty = posInitialQty * 0.5;
+      const pGross = (isLong ? tp1Price - pos.entryPrice : pos.entryPrice - tp1Price) * partialQty;
+      const pFees = (pos.entryPrice + tp1Price) * partialQty * feeRate;
+      posRealizedGrossUsd += pGross;
+      posRealizedUsd += pGross - pFees;
+      posRemainingQty = posInitialQty - partialQty;
+      posPartialTaken = true;
+      pos.slPrice = pos.entryPrice * (isLong ? 1.0005 : 0.9995);
+      pos.breakevenApplied = true;
+    };
+
+    if (isLong ? currBar.low <= openPos.slPrice : currBar.high >= openPos.slPrice) {
+      exitPrice = openPos.slPrice;
+      reason = openPos.breakevenApplied ? "BREAKEVEN_LOCKED" : "SL_HIT";
+    } else if (isLong ? currBar.high >= openPos.tpPrice : currBar.low <= openPos.tpPrice) {
+      if (breakevenEnabled && !posPartialTaken) {
+        takePartialTp1(openPos);
+      }
+      exitPrice = openPos.tpPrice;
+      reason = "TP_HIT";
+    } else if (breakevenEnabled && !posPartialTaken) {
+      const bestFav = isLong ? currBar.high - openPos.entryPrice : openPos.entryPrice - currBar.low;
+      if (bestFav >= openPos.slDist * 0.85) {
+        takePartialTp1(openPos);
+      }
+    }
+
+    if (exitPrice !== null && reason !== null) {
+      finalizePositionExit(openPos, exitPrice, currBar.time, reason);
+      openPos = null;
+      lastTradeExitTimeMs = currBar.time;
+    }
+    return true;
+  };
+
+  const tryOpenSimPosition = (
+    action: "BUY" | "SELL",
+    slPrice: number,
+    tpPrice: number,
+    targetRrr: number,
+    entryPrice: number,
+    entryTimeMs: number,
+    entryTf: "M5" | "M1",
+    sweepKey?: string
+  ): boolean => {
+    const sz = sizeSimCryptoPosition(entryPrice, slPrice, balance, riskPercent, leverage, maxMarginPct, accountMode);
+    if (sz.qty <= 0 || slPrice <= 0 || tpPrice <= 0) return false;
+    const slDist = Math.abs(entryPrice - slPrice);
+    if (slDist <= 0) return false;
+    posInitialQty = sz.qty;
+    posRemainingQty = sz.qty;
+    posRealizedUsd = 0;
+    posRealizedGrossUsd = 0;
+    posPartialTaken = false;
+    openPos = {
+      type: action,
+      ...sz,
+      entryPrice,
+      slPrice,
+      initialSlPrice: slPrice,
+      slDist,
+      tpPrice,
+      targetRrr,
+      breakevenApplied: false,
+      entryTimeMs,
+      sessionLabel: getPktSessionLabel(entryTimeMs),
+      entryTf,
+    };
+    if (sweepKey) usedSweeps.add(sweepKey);
+    return true;
+  };
+
+  const useM1Hybrid = Boolean(m1Bars && m1Bars.length >= 160 && m5Bars.length >= 50);
+  let handoffM1Idx = 120;
+  let handoffTimeMs = Infinity;
+  if (useM1Hybrid && m1Bars) {
+    while (handoffM1Idx < m1Bars.length - 10 && m1Bars[handoffM1Idx]!.time < m5Bars[46]!.time) {
+      handoffM1Idx++;
+    }
+    handoffTimeMs = m1Bars[handoffM1Idx]!.time;
+  }
+
+  // Phase 1: M5 Strict simulation up to M1 history handoff (or entire window when m1Bars omitted)
+  for (let i = 45; i < m5Bars.length - 1 && (!useM1Hybrid || m5Bars[i + 1]!.time <= handoffTimeMs); i++) {
     const currBar = m5Bars[i]!;
     while (m15Ptr + 1 < m15Bars.length && m15Bars[m15Ptr + 1]!.time <= currBar.time) {
       m15Ptr++;
     }
 
-    if (openPos) {
-      let exitPrice: number | null = null;
-      let reason: CryptoTradeSim["reason"] | null = null;
-      const isLong = openPos.type === "BUY";
-
-      const takePartialTp1 = (pos: OpenPos) => {
-        const tp1Price = isLong ? pos.entryPrice + pos.slDist * 0.85 : pos.entryPrice - pos.slDist * 0.85;
-        const partialQty = posInitialQty * 0.5;
-        const pGross = (isLong ? tp1Price - pos.entryPrice : pos.entryPrice - tp1Price) * partialQty;
-        const pFees = (pos.entryPrice + tp1Price) * partialQty * feeRate;
-        posRealizedGrossUsd += pGross;
-        posRealizedUsd += pGross - pFees;
-        posRemainingQty = posInitialQty - partialQty;
-        posPartialTaken = true;
-        pos.slPrice = pos.entryPrice * (isLong ? 1.0005 : 0.9995);
-        pos.breakevenApplied = true;
-      };
-
-      if (isLong ? currBar.low <= openPos.slPrice : currBar.high >= openPos.slPrice) {
-        exitPrice = openPos.slPrice;
-        reason = openPos.breakevenApplied ? "BREAKEVEN_LOCKED" : "SL_HIT";
-      } else if (isLong ? currBar.high >= openPos.tpPrice : currBar.low <= openPos.tpPrice) {
-        if (breakevenEnabled && !posPartialTaken) {
-          takePartialTp1(openPos);
-        }
-        exitPrice = openPos.tpPrice;
-        reason = "TP_HIT";
-      } else if (breakevenEnabled && !posPartialTaken) {
-        const bestFav = isLong ? currBar.high - openPos.entryPrice : openPos.entryPrice - currBar.low;
-        if (bestFav >= openPos.slDist * 0.85) {
-          takePartialTp1(openPos);
-        }
-      }
-
-      if (exitPrice !== null && reason !== null) {
-        finalizePositionExit(openPos, exitPrice, currBar.time, reason);
-        openPos = null;
-        lastTradeExitBar = i;
-      }
-      continue;
-    }
-
-    if (currBar.time < startTimeMs || i - lastTradeExitBar < 2) continue;
+    if (advanceOpenPosition(currBar)) continue;
+    if (currBar.time < startTimeMs || currBar.time - lastTradeExitTimeMs < 10 * 60_000) continue;
 
     const entryBar = m5Bars[i + 1]!;
     if (sessionFilterEnabled && !isInPktKillzone(entryBar.time)) continue;
@@ -1302,39 +1728,125 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
     const entryPrice = rndPrice(entryBar.open, scale.digits);
     const ev = evaluateClosedSmcSetup(m5Slice, m15Slice, entryPrice, maxSlPct, leverage, minRrr, scale);
     if (ev.action === "BUY" || ev.action === "SELL") {
-      const sz = sizeSimCryptoPosition(entryPrice, ev.slPrice, balance, riskPercent, leverage, maxMarginPct, accountMode);
-      if (sz.qty > 0) {
-        const slDist = Math.abs(entryPrice - ev.slPrice);
-        posInitialQty = sz.qty;
-        posRemainingQty = sz.qty;
-        posRealizedUsd = 0;
-        posRealizedGrossUsd = 0;
-        posPartialTaken = false;
-        openPos = {
-          type: ev.action,
-          ...sz,
-          entryPrice,
-          slPrice: ev.slPrice,
-          initialSlPrice: ev.slPrice,
-          slDist,
-          tpPrice: ev.tpPrice,
-          targetRrr: ev.rrr,
-          breakevenApplied: false,
-          entryTimeMs: entryBar.time,
-          sessionLabel: getPktSessionLabel(entryBar.time),
+      const swTime = ev.hasSweep && ev.sw.sweepIdx >= 0 && ev.sw.sweepIdx < m5Slice.length ? m5Slice[ev.sw.sweepIdx]!.time : 0;
+      const sweepKey = swTime > 0 ? `${ev.isBull ? "B" : "S"}:${swTime}` : undefined;
+      tryOpenSimPosition(ev.action, ev.slPrice, ev.tpPrice, ev.rrr, entryPrice, entryBar.time, "M5", sweepKey);
+    }
+  }
+
+  // Phase 2: Bar-by-bar M5 Strict + Forex-style M1 LTF Refinement (zero lookahead)
+  if (useM1Hybrid && m1Bars) {
+    let m5ClosedEnd = 0;
+    let m15ClosedEnd = 0;
+    let cachedM5End = -1;
+    let cachedM15End = -1;
+    let cachedState: {
+      isBull: boolean;
+      isBear: boolean;
+      hasSweep: boolean;
+      sw: SweepResult;
+      sweepKey: string;
+      m5Slice: OhlcBar[];
+      m15Slice: OhlcBar[];
+      scale: CryptoScale;
+    } | null = null;
+
+    for (let j = handoffM1Idx; j < m1Bars.length - 1; j++) {
+      const currM1 = m1Bars[j]!;
+      const nextM1 = m1Bars[j + 1]!;
+      const decisionTime = nextM1.time;
+
+      while (m5ClosedEnd < m5Bars.length && m5Bars[m5ClosedEnd]!.time + 5 * 60_000 <= decisionTime) {
+        m5ClosedEnd++;
+      }
+      while (m15ClosedEnd < m15Bars.length && m15Bars[m15ClosedEnd]!.time + 15 * 60_000 <= decisionTime) {
+        m15ClosedEnd++;
+      }
+
+      if (advanceOpenPosition(currM1)) continue;
+      if (currM1.time < startTimeMs || nextM1.time - lastTradeExitTimeMs < 10 * 60_000) continue;
+      if (sessionFilterEnabled && !isInPktKillzone(nextM1.time)) continue;
+      if (m5ClosedEnd < 12 || m15ClosedEnd < 15) continue;
+
+      if (m5ClosedEnd !== cachedM5End || m15ClosedEnd !== cachedM15End) {
+        cachedM5End = m5ClosedEnd;
+        cachedM15End = m15ClosedEnd;
+        const m5Slice = m5Bars.slice(Math.max(0, m5ClosedEnd - 120), m5ClosedEnd);
+        const m15Slice = m15Bars.slice(Math.max(0, m15ClosedEnd - 100), m15ClosedEnd);
+        const scale = computeCryptoScale(m5Slice[m5Slice.length - 1]!.close);
+        const m15Bias = detectMarketStructure(m15Slice, scale);
+        const isBull = m15Bias === "BULLISH";
+        const isBear = m15Bias === "BEARISH";
+        const sweeps = isBull || isBear ? detectLiquiditySweep(m5Slice, scale) : null;
+        const sw: SweepResult = sweeps
+          ? isBull
+            ? sweeps.sellSweep
+            : sweeps.buySweep
+          : { found: false, sweepExtreme: 0, swingLevel: 0, sweepIdx: -1 };
+        const hasSweep = Boolean((isBull || isBear) && sw.found);
+        const swTime = hasSweep && sw.sweepIdx >= 0 && sw.sweepIdx < m5Slice.length ? m5Slice[sw.sweepIdx]!.time : 0;
+        cachedState = {
+          isBull,
+          isBear,
+          hasSweep,
+          sw,
+          sweepKey: hasSweep && swTime > 0 ? `${isBull ? "B" : "S"}:${swTime}` : "",
+          m5Slice,
+          m15Slice,
+          scale,
         };
+      }
+
+      if (!cachedState || (!cachedState.isBull && !cachedState.isBear) || !cachedState.hasSweep) continue;
+      if (cachedState.sweepKey && usedSweeps.has(cachedState.sweepKey)) continue;
+
+      const entryPrice = rndPrice(nextM1.open, cachedState.scale.digits);
+      const evM5 = evaluateClosedSmcSetup(
+        cachedState.m5Slice,
+        cachedState.m15Slice,
+        entryPrice,
+        maxSlPct,
+        leverage,
+        minRrr,
+        cachedState.scale
+      );
+      if (evM5.action === "BUY" || evM5.action === "SELL") {
+        if (tryOpenSimPosition(evM5.action, evM5.slPrice, evM5.tpPrice, evM5.rrr, entryPrice, nextM1.time, "M5", cachedState.sweepKey)) {
+          continue;
+        }
+      }
+
+      const m1Slice = m1Bars.slice(Math.max(0, j - 179), j + 1);
+      const m1Ev = evaluateM1LtfRefinement(
+        cachedState.isBull,
+        cachedState.m5Slice,
+        cachedState.m15Slice,
+        m1Slice,
+        cachedState.sw,
+        entryPrice,
+        maxSlPct,
+        leverage,
+        minRrr,
+        cachedState.scale
+      );
+      if (m1Ev && (m1Ev.action === "BUY" || m1Ev.action === "SELL")) {
+        tryOpenSimPosition(m1Ev.action, m1Ev.slPrice, m1Ev.tpPrice, m1Ev.rrr, entryPrice, nextM1.time, "M1", cachedState.sweepKey);
       }
     }
   }
 
-  if (openPos && m5Bars.length > 0) {
-    const lastBar = m5Bars[m5Bars.length - 1]!;
-    finalizePositionExit(openPos, lastBar.close, lastBar.time, "OPEN_END");
+  if (openPos) {
+    const lastBar = useM1Hybrid && m1Bars && m1Bars.length > 0 ? m1Bars[m1Bars.length - 1]! : m5Bars[m5Bars.length - 1];
+    if (lastBar) {
+      finalizePositionExit(openPos, lastBar.close, lastBar.time, "OPEN_END");
+    }
   }
 
   const wins = trades.filter((t) => t.profitUsd > 0).length;
   const losses = trades.filter((t) => t.profitUsd < 0).length;
   const breakevens = trades.filter((t) => t.reason === "BREAKEVEN_LOCKED").length;
+  const m1TradesCount = trades.filter((t) => t.entryTf === "M1").length;
+  const m5TradesCount = trades.length - m1TradesCount;
   const grossWin = trades.filter((t) => t.profitUsd > 0).reduce((s, t) => s + t.profitUsd, 0);
   const grossLoss = Math.abs(trades.filter((t) => t.profitUsd < 0).reduce((s, t) => s + t.profitUsd, 0));
   const profitFactor = grossLoss > 0 ? Number((grossWin / grossLoss).toFixed(2)) : grossWin > 0 ? 9.99 : 0;
@@ -1350,6 +1862,9 @@ export function runCryptoSmcBacktest(params: CryptoBacktestParams) {
     accountMode,
     leverage,
     maxMarginPct: accountMode === "PERSONAL" ? Math.min(100, maxMarginPct) : Math.min(80, maxMarginPct),
+    executionMode: useM1Hybrid ? "M15 + M5 + M1 LTF" : "M15 + M5 Strict",
+    m1TradesCount,
+    m5TradesCount,
     totalTrades: trades.length,
     wins,
     losses,
