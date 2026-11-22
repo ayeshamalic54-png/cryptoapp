@@ -49,6 +49,7 @@ let isScanTickRunning = false;
 let started = false;
 let peakEquityTracker = 0;
 let lastSyncedConfigLev = 0;
+let didInitialLedgerReconcile = false;
 
 function isTestnet(): boolean {
   return ["true", "1", "yes"].includes((process.env.USE_BINANCE_TESTNET || "").trim().toLowerCase());
@@ -896,12 +897,18 @@ export function computeDrawdownMetrics(
 }
 
 /** Repairs any recent closed trades whose DB PnL missed partial/chunked Binance fills. */
-async function reconcileRecentClosedDiscrepancies() {
-  if (!hasApiCreds()) return;
+async function reconcileRecentClosedDiscrepancies(preloadedSnap?: {
+  equity: number;
+  positions: any[];
+  statusCode: number;
+}): Promise<{ cleanedPeak?: number }> {
+  if (!hasApiCreds()) return {};
+  let cleanedPeak: number | undefined;
   try {
     // Heal any impossible daily_metrics drawdown spike or zero-trade multi-asset BTC baseline skew
-    const snap = await getAccountSnapshot();
+    const snap = preloadedSnap ?? (await getAccountSnapshot());
     if (snap.statusCode === 200 && snap.equity > 0) {
+      didInitialLedgerReconcile = true;
       const todayStr = getPktDateStr();
       const botRow = ((await db.execute(sql`SELECT id, initial_balance, max_equity_peak, metrics_reset_at FROM bot_state ORDER BY id ASC LIMIT 1`)).rows || [])[0] as any;
       const dmRow = ((await db.execute(sql`SELECT start_equity, max_drawdown_percent, trades_today FROM daily_metrics WHERE trading_date=${todayStr} AND COALESCE(mt5_login,0)=0 LIMIT 1`)).rows || [])[0] as any;
@@ -945,12 +952,13 @@ async function reconcileRecentClosedDiscrepancies() {
           if (runningEq > realizedPeak) realizedPeak = runningEq;
         }
         if (recordedPeak - realizedPeak > 50) {
-          const cleanPeak = Number(realizedPeak.toFixed(2));
-          peakEquityTracker = cleanPeak;
+          const nextPeak = Number(realizedPeak.toFixed(2));
+          cleanedPeak = nextPeak;
+          peakEquityTracker = nextPeak;
           await db.execute(
-            sql`UPDATE bot_state SET max_equity_peak=${cleanPeak.toString()}, updated_at=NOW() WHERE id=${Number(botRow.id)}`
+            sql`UPDATE bot_state SET max_equity_peak=${nextPeak.toString()}, updated_at=NOW() WHERE id=${Number(botRow.id)}`
           );
-          logger.info({ prevPeak: recordedPeak, cleanPeak }, "Cleared non-stablecoin collateral inflation from max_equity_peak");
+          logger.info({ prevPeak: recordedPeak, cleanPeak: nextPeak }, "Cleared non-stablecoin collateral inflation from max_equity_peak");
         }
       }
     }
@@ -965,7 +973,7 @@ async function reconcileRecentClosedDiscrepancies() {
             ORDER BY close_time DESC LIMIT 20`
       )
     ).rows as any[];
-    if (!rows.length) return;
+    if (!rows.length) return { cleanedPeak };
 
     for (const r of rows) {
       const sym = String(r.symbol || "").toUpperCase();
@@ -1007,6 +1015,7 @@ async function reconcileRecentClosedDiscrepancies() {
   } catch (err) {
     logger.warn({ err }, "Startup closed-trade ledger reconciliation skipped");
   }
+  return { cleanedPeak };
 }
 
 function getPktDateStr(): string {
@@ -1047,6 +1056,7 @@ async function runFastCycle() {
     let positions: any[] = [];
     let binanceStatusCode = 200;
     let totalUnrealizedProfit = 0;
+    let healedPeak: number | undefined;
 
     if (credsPresent) {
       const snap = await getAccountSnapshot();
@@ -1055,6 +1065,14 @@ async function runFastCycle() {
         equity = snap.equity;
         positions = snap.positions;
         totalUnrealizedProfit = snap.totalUnrealizedProfit;
+        if (!didInitialLedgerReconcile) {
+          const rec = await reconcileRecentClosedDiscrepancies({
+            equity: snap.equity,
+            positions: snap.positions,
+            statusCode: 200,
+          });
+          healedPeak = rec.cleanedPeak;
+        }
       }
     }
     const binanceBlocked451 = binanceStatusCode === 451;
@@ -1266,7 +1284,7 @@ async function runFastCycle() {
 
     // Compute Daily Drawdown & Overall Drawdown strictly when balance is below Starting Equity / floor
     const { dailyDdPct, overallDdPct } = computeDrawdownMetrics(equity, initBal, startEq);
-    const dbPeakEq = Math.max(Number(botRow.max_equity_peak ?? 0), equity);
+    const dbPeakEq = Math.max(healedPeak ?? Number(botRow.max_equity_peak ?? 0), equity);
     peakEquityTracker = dbPeakEq;
 
     const resetAt = botRow.metrics_reset_at ? new Date(botRow.metrics_reset_at) : null;
@@ -1494,7 +1512,8 @@ async function runSmcScanCycle() {
     let bestCandidate: { sym: string; evalRes: ReturnType<typeof analyzeLiveSmcTelemetry> } | null = null;
     let bestScore = -1;
 
-    if (getHostCooldownState(getBaseUrl()).softThrottled) {
+    const hostCd = getHostCooldownState(getBaseUrl());
+    if (hostCd.softThrottled && !hostCd.coolingDown) {
       logger.info("Skipping background SMC kline scan briefly while Binance API weight cools down");
       return;
     }

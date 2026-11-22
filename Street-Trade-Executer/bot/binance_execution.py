@@ -108,15 +108,25 @@ def send_signed_request(method, endpoint, params=None):
         logger.error(f"Binance connection error on {endpoint}: {e}")
         return None
 
+STABLECOIN_ASSETS = {"USDT", "USDC", "FDUSD", "BUSD", "TUSD", "USDP"}
+
 def get_binance_usdt_balance():
-    """Fetches total margin balance and available balance on Binance Futures (supporting Multi-Asset Mode)."""
+    """Fetches stablecoin equity (USDT + USDC + ...) plus unrealized PnL, excluding volatile BTC/BNB collateral."""
     res = send_signed_request("GET", "/fapi/v2/account")
     if res is not None and res.status_code == 200:
         data = res.json()
+        assets = data.get("assets") or []
+        stable_assets = [a for a in assets if str(a.get("asset", "")).upper() in STABLECOIN_ASSETS]
+        stable_wallet = sum(float(a.get("walletBalance", 0.0) or 0.0) for a in stable_assets)
+        unreal = float(data.get("totalUnrealizedProfit", 0.0) or 0.0)
+        if stable_assets and stable_wallet > 0:
+            real_balance = round(stable_wallet + unreal, 2)
+            raw_avail = float(data.get("availableBalance", real_balance) or real_balance)
+            available_balance = round(min(raw_avail, max(0.0, real_balance)), 2)
+            return real_balance, available_balance
+
         total_margin = float(data.get("totalMarginBalance", 0.0))
         max_withdraw = float(data.get("maxWithdrawAmount", total_margin))
-        
-        # In Multi-Asset Mode, totalMarginBalance represents total account equity across USDT & USDC
         real_balance = total_margin if total_margin > 0 else max_withdraw
         available_balance = max_withdraw if max_withdraw > 0 else real_balance
         return real_balance, available_balance
