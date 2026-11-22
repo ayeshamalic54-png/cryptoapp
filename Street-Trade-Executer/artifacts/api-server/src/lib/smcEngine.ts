@@ -403,6 +403,7 @@ function detectChochBos(
     for (let j = sweepIdx + 1; j < dfM5.length; j++) {
       if (dfM5[j]!.close > chochLvl) return { found: true, level: chochLvl, idx: j };
     }
+    return { found: false, level: chochLvl, idx: -1 };
   } else {
     const prior = sl.filter(([, idx]) => idx < sweepIdx);
     let chochLvl = prior.length ? prior[prior.length - 1]![0] : Infinity;
@@ -415,8 +416,8 @@ function detectChochBos(
     for (let j = sweepIdx + 1; j < dfM5.length; j++) {
       if (dfM5[j]!.close < chochLvl) return { found: true, level: chochLvl, idx: j };
     }
+    return { found: false, level: chochLvl, idx: -1 };
   }
-  return { found: false, level: 0, idx: -1 };
 }
 
 interface ZoneBox {
@@ -950,8 +951,29 @@ function evaluateM1LtfRefinement(
       break;
     }
   }
+  const safeChochLvl = Number.isFinite(chochLvl) && chochLvl > 0 ? chochLvl : 0;
   const hasM1Choch = chochRelIdx >= 0 && ns - 1 - chochRelIdx <= 25;
-  if (!hasM1Choch) return null;
+  if (!hasM1Choch) {
+    if (safeChochLvl <= 0) return null;
+    return {
+      hasM1Choch: false,
+      chochLvl: safeChochLvl,
+      chochIdx: -1,
+      rejIdx: -1,
+      m1Fvgs: [],
+      hasM1Retest: false,
+      hasM1Rej: false,
+      s7Ok: false,
+      s8Ok: false,
+      s9Ok: false,
+      slPrice: 0,
+      tpPrice: 0,
+      rrr: 0,
+      action: "NONE",
+      stepProgress: 2,
+      sliceStart,
+    };
+  }
 
   const m1MinGap = scale.refPrice * 0.00018;
   const m1MitTol = scale.refPrice * 0.00008;
@@ -1148,6 +1170,7 @@ function evaluateClosedSmcSetup(
 
   if (hasSweep && (isBull || isBear)) {
     const ch = detectChochBos(closedBars, sw.sweepIdx, isBull);
+    if (ch.level > 0) chochLvl = ch.level;
     const reclaimOk = isBull ? closedBar.close >= sw.sweepExtreme : closedBar.close <= sw.sweepExtreme;
     if (ch.found && closedIdx - ch.idx <= 18 && reclaimOk) {
       chochOk = true;
@@ -1441,8 +1464,14 @@ export function analyzeLiveSmcTelemetry(
       m15_bias: m15Bias === "BULLISH" ? "BULLISH 🟢" : m15Bias === "BEARISH" ? "BEARISH 🔴" : "NEUTRAL ⚪",
       sweep_status: hasSweep ? "PASS 🟢 (M5 Sweep)" : "FAIL ⚪",
       sweep_price: hasSweep ? rndPrice(sw.sweepExtreme, scale.digits) : 0,
-      choch_status: chochOk ? (useM1Telemetry ? "PASS 🟢 (M1 CHoCH)" : "PASS 🟢 (CHoCH)") : "FAIL ⚪",
-      choch_price: chochOk ? rndPrice(chochLvl, scale.digits) : 0,
+      choch_status: chochOk
+        ? useM1Telemetry
+          ? "PASS 🟢 (M1 CHoCH)"
+          : "PASS 🟢 (CHoCH)"
+        : hasSweep && chochLvl > 0
+        ? "WAITING ⚪ (Awaiting Break)"
+        : "FAIL ⚪",
+      choch_price: (chochOk || hasSweep) && chochLvl > 0 ? rndPrice(chochLvl, scale.digits) : 0,
       fvg_status: fvgOk ? `PASS 🟢 (${legFvgs.length} ${useM1Telemetry ? "M1 " : ""}FVG)` : "FAIL ⚪",
       retest_status: retestOk ? `PASS 🟢 (${useM1Telemetry ? "M1 " : ""}Retested)` : "FAIL ⚪",
       s6_status: s6Ok ? `PASS 🟢 (${useM1Telemetry ? "M1 " : ""}Rejection)` : "FAIL ⚪",

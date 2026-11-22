@@ -405,16 +405,23 @@ export function SmcChartOverlay({
         if (bestIdx >= 0 && bestDiff < matchTol) mapped[bestIdx]!.isSweep = true;
       }
       if (s3Pass && chochPrice > 0 && ((wantM1 && isM1Active) || (!wantM1 && !isM1Active)) && !mapped.some((c) => c.isChoch)) {
-        let bestIdx = -1;
-        let bestDiff = Infinity;
-        mapped.forEach((c, idx) => {
-          const diff = Math.abs((isBullishSetup ? c.high : c.low) - chochPrice);
-          if (diff < bestDiff) {
-            bestDiff = diff;
-            bestIdx = idx;
-          }
-        });
-        if (bestIdx >= 0 && bestDiff < matchTol) mapped[bestIdx]!.isChoch = true;
+        const breakIdx = mapped.findIndex((c) =>
+          isBullishSetup ? c.close > chochPrice && c.open <= chochPrice : c.close < chochPrice && c.open >= chochPrice
+        );
+        if (breakIdx >= 0) {
+          mapped[breakIdx]!.isChoch = true;
+        } else {
+          let bestIdx = -1;
+          let bestDiff = Infinity;
+          mapped.forEach((c, idx) => {
+            const diff = Math.abs(c.close - chochPrice);
+            if (diff < bestDiff) {
+              bestDiff = diff;
+              bestIdx = idx;
+            }
+          });
+          if (bestIdx >= 0 && bestDiff < matchTol) mapped[bestIdx]!.isChoch = true;
+        }
       }
 
       return mapped;
@@ -527,9 +534,9 @@ export function SmcChartOverlay({
     const lowest = Math.min(...completed.map((c) => c.low));
     const swingHigh = sweepPrice > 0 && isBearishSetup ? sweepPrice : highest;
     const swingLow = sweepPrice > 0 && isBullishSetup ? sweepPrice : lowest;
-    const chochLvl = chochPrice > 0 && s3Pass ? chochPrice : 0;
+    const chochLvl = (s2Pass || s3Pass || isTradeActive) && chochPrice > 0 ? chochPrice : 0;
     return { swingHigh, swingLow, chochLvl };
-  }, [candles, sweepPrice, chochPrice, s3Pass, isBullishSetup, isBearishSetup]);
+  }, [candles, sweepPrice, chochPrice, s2Pass, s3Pass, isTradeActive, isBullishSetup, isBearishSetup]);
 
   const svgWidth = Math.max(320, containerWidth);
   const svgHeight = isMobile ? 440 : 475;
@@ -544,9 +551,9 @@ export function SmcChartOverlay({
   const plotWidth = Math.max(100, candlesRight - chartLeft);
   const plotHeight = Math.max(100, chartBottom - chartTop);
 
-  const showSlLevel = isTradeActive;
-  const showTpLevel = isTradeActive;
-  const showEntryLevel = isTradeActive;
+  const showSlLevel = isTradeActive || s2Pass;
+  const showTpLevel = isTradeActive || s4Pass;
+  const showEntryLevel = isTradeActive || closedRejectPass;
 
   const candleMin =
     candles.length > 0 ? Math.min(...candles.map((c) => c.low), ...(livePrice > 0 ? [livePrice] : [])) : 0;
@@ -558,22 +565,24 @@ export function SmcChartOverlay({
   const minPrice = useMemo(() => {
     let min = candleMin - vertPad;
     const pad = candleSpan * 0.08;
-    if (isTradeActive && effectiveEntryPrice > 0) min = Math.min(min, effectiveEntryPrice - pad);
+    if (showEntryLevel && effectiveEntryPrice > 0) min = Math.min(min, effectiveEntryPrice - pad);
     if (showSlLevel && effectiveSlPrice > 0 && candleMin - effectiveSlPrice <= candleSpan * 4.0) min = Math.min(min, effectiveSlPrice - pad);
     if (showTpLevel && effectiveTpPrice > 0 && candleMin - effectiveTpPrice <= candleSpan * 4.0) min = Math.min(min, effectiveTpPrice - pad);
+    if (swingStructure.chochLvl > 0 && candleMin - swingStructure.chochLvl <= candleSpan * 1.5) min = Math.min(min, swingStructure.chochLvl - pad);
     if (swingStructure.swingLow > 0 && candleMin - swingStructure.swingLow <= candleSpan * 1.3) min = Math.min(min, swingStructure.swingLow - pad);
     return min;
-  }, [candleMin, vertPad, candleSpan, isTradeActive, effectiveEntryPrice, showSlLevel, effectiveSlPrice, showTpLevel, effectiveTpPrice, swingStructure.swingLow]);
+  }, [candleMin, vertPad, candleSpan, showEntryLevel, effectiveEntryPrice, showSlLevel, effectiveSlPrice, showTpLevel, effectiveTpPrice, swingStructure.chochLvl, swingStructure.swingLow]);
 
   const maxPrice = useMemo(() => {
     let max = candleMax + vertPad;
     const pad = candleSpan * 0.08;
-    if (isTradeActive && effectiveEntryPrice > 0) max = Math.max(max, effectiveEntryPrice + pad);
+    if (showEntryLevel && effectiveEntryPrice > 0) max = Math.max(max, effectiveEntryPrice + pad);
     if (showTpLevel && effectiveTpPrice > 0 && effectiveTpPrice - candleMax <= candleSpan * 4.0) max = Math.max(max, effectiveTpPrice + pad);
     if (showSlLevel && effectiveSlPrice > 0 && effectiveSlPrice - candleMax <= candleSpan * 4.0) max = Math.max(max, effectiveSlPrice + pad);
+    if (swingStructure.chochLvl > 0 && swingStructure.chochLvl - candleMax <= candleSpan * 1.5) max = Math.max(max, swingStructure.chochLvl + pad);
     if (swingStructure.swingHigh > 0 && swingStructure.swingHigh - candleMax <= candleSpan * 1.3) max = Math.max(max, swingStructure.swingHigh + pad);
     return max;
-  }, [candleMax, vertPad, candleSpan, isTradeActive, effectiveEntryPrice, showTpLevel, effectiveTpPrice, showSlLevel, effectiveSlPrice, swingStructure.swingHigh]);
+  }, [candleMax, vertPad, candleSpan, showEntryLevel, effectiveEntryPrice, showTpLevel, effectiveTpPrice, showSlLevel, effectiveSlPrice, swingStructure.chochLvl, swingStructure.swingHigh]);
 
   const priceRange = Math.max(scaleRef * 1e-6, maxPrice - minPrice);
 
@@ -1027,9 +1036,9 @@ export function SmcChartOverlay({
               Sweep: ${fmtP(sweepPrice)}
             </div>
           )}
-          {s3Pass && chochPrice > 0 && (
-            <div className="px-3 py-1 rounded bg-amber-950 border border-amber-500 text-amber-300 font-bold">
-              CHoCH: ${fmtP(chochPrice)}
+          {(s2Pass || s3Pass || isTradeActive) && chochPrice > 0 && (
+            <div className={cn("px-3 py-1 rounded border font-bold", s3Pass ? "bg-amber-950 border-amber-400 text-amber-200" : "bg-amber-950/60 border-amber-600/60 text-amber-300")}>
+              {s3Pass ? "CHoCH" : "CHoCH Trigger"}: ${fmtP(chochPrice)}
             </div>
           )}
           {isTradeActive ? (
@@ -1389,7 +1398,40 @@ export function SmcChartOverlay({
                 <line x1={chartLeft} y1={getY(swingStructure.swingLow)} x2={chartRight} y2={getY(swingStructure.swingLow)} stroke="#0891b2" strokeWidth={s2Pass && isBullishSetup ? 2.2 : 1.3} strokeDasharray={s2Pass && isBullishSetup ? "none" : "6 4"} />
               )}
               {swingStructure.chochLvl > 0 && (
-                <line x1={chartLeft} y1={getY(swingStructure.chochLvl)} x2={chartRight} y2={getY(swingStructure.chochLvl)} stroke="#f59e0b" strokeWidth={s3Pass ? 2.2 : 1.3} strokeDasharray={s3Pass ? "none" : "6 4"} />
+                <g>
+                  <line
+                    x1={chartLeft}
+                    y1={getY(swingStructure.chochLvl)}
+                    x2={chartRight}
+                    y2={getY(swingStructure.chochLvl)}
+                    stroke={s3Pass ? "#f59e0b" : "#d97706"}
+                    strokeWidth={s3Pass ? 2.4 : 1.5}
+                    strokeDasharray={s3Pass ? "none" : "6 4"}
+                    opacity={s3Pass ? 1 : 0.85}
+                  />
+                  {(() => {
+                    const chY = Math.max(chartTop + 14, Math.min(chartBottom - 6, getY(swingStructure.chochLvl) - 6));
+                    const lbl = `${s3Pass ? "CHOCH" : "CHOCH LVL"} $${fmtP(swingStructure.chochLvl)}`;
+                    const boxW = Math.max(88, lbl.length * 6.4 + 12);
+                    return (
+                      <g pointerEvents="none">
+                        <rect
+                          x={chartLeft + 4}
+                          y={chY - 12}
+                          width={boxW}
+                          height={15}
+                          rx="3"
+                          fill={s3Pass ? "#d97706" : "#78350f"}
+                          stroke={s3Pass ? "#fde68a" : "#d97706"}
+                          strokeWidth="1"
+                        />
+                        <text x={chartLeft + 10} y={chY - 1.5} fill="#ffffff" fontSize="9" fontFamily="monospace" fontWeight="900">
+                          {lbl}
+                        </text>
+                      </g>
+                    );
+                  })()}
+                </g>
               )}
 
               {/* ENTRY, SL, TP BRACKET */}
@@ -1463,8 +1505,41 @@ export function SmcChartOverlay({
                     )}
                     {c.isChoch && (
                       <g>
-                        <rect x={cx - 24} y={isBullishSetup ? yHigh - 26 : yLow + 10} width="48" height="16" fill="#d97706" rx="3" stroke="#fde68a" />
-                        <text x={cx} y={isBullishSetup ? yHigh - 15 : yLow + 21} fill="#ffffff" fontSize="8.5" fontFamily="monospace" fontWeight="900" textAnchor="middle">CHOCH</text>
+                        <circle
+                          cx={cx}
+                          cy={isBullishSetup ? Math.max(chartTop + 6, yHigh - 6) : Math.min(chartBottom - 6, yLow + 6)}
+                          r="3.5"
+                          fill="#f59e0b"
+                        />
+                        <rect
+                          x={cx - (isMobile ? 24 : 28)}
+                          y={
+                            isBullishSetup
+                              ? Math.max(chartTop + 2, yHigh - 28)
+                              : Math.min(chartBottom - 20, yLow + 12)
+                          }
+                          width={isMobile ? 48 : 56}
+                          height={17}
+                          fill="#d97706"
+                          rx="4"
+                          stroke="#fde68a"
+                          strokeWidth="1.3"
+                        />
+                        <text
+                          x={cx}
+                          y={
+                            (isBullishSetup
+                              ? Math.max(chartTop + 2, yHigh - 28)
+                              : Math.min(chartBottom - 20, yLow + 12)) + 11.5
+                          }
+                          fill="#ffffff"
+                          fontSize={isMobile ? "8.5" : "9.5"}
+                          fontFamily="monospace"
+                          fontWeight="900"
+                          textAnchor="middle"
+                        >
+                          CHOCH
+                        </text>
                       </g>
                     )}
                     {idx % (isMobile ? 5 : 4) === 0 && (
@@ -1603,8 +1678,12 @@ export function SmcChartOverlay({
                 {
                   label: "C3: M1 LTF CHoCH Break",
                   pass: s3Pass,
-                  badge: s3Pass ? chochStatus : "PENDING ⚪",
-                  desc: s3Pass ? `Confirmed M1 LTF shift closing past $${fmtP(chochPrice)}.` : "Waiting for M1 candle close beyond minor pivot.",
+                  badge: s3Pass ? chochStatus : s2Pass && chochPrice > 0 ? `SCAN $${fmtP(chochPrice)}` : "PENDING ⚪",
+                  desc: s3Pass
+                    ? `Confirmed M1 LTF shift closing past $${fmtP(chochPrice)}.`
+                    : s2Pass && chochPrice > 0
+                    ? `Awaiting M1 close ${isBullishSetup ? "above" : "below"} minor swing pivot $${fmtP(chochPrice)}.`
+                    : "Waiting for M1 candle close beyond minor pivot.",
                 },
                 {
                   label: "C4: M1 Displacement FVG",
@@ -1643,8 +1722,12 @@ export function SmcChartOverlay({
                 {
                   label: "C3: M5 CHoCH Break",
                   pass: s3Pass,
-                  badge: s3Pass ? chochStatus : "PENDING ⚪",
-                  desc: s3Pass ? `Closed past $${fmtP(chochPrice)} confirming shift.` : "Waiting for closed-candle break past minor pivot.",
+                  badge: s3Pass ? chochStatus : s2Pass && chochPrice > 0 ? `SCAN $${fmtP(chochPrice)}` : "PENDING ⚪",
+                  desc: s3Pass
+                    ? `Closed past $${fmtP(chochPrice)} confirming shift.`
+                    : s2Pass && chochPrice > 0
+                    ? `Awaiting M5 close ${isBullishSetup ? "above" : "below"} minor swing pivot $${fmtP(chochPrice)}.`
+                    : "Waiting for closed-candle break past minor pivot.",
                 },
                 {
                   label: "C4: M5 Displacement FVG",
